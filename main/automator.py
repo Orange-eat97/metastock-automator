@@ -30,6 +30,8 @@ from pywinauto import Application, Desktop, mouse
 from pywinauto.base_wrapper import BaseWrapper
 from pywinauto.keyboard import send_keys
 
+from requestReceiver import CliRequestReceiver, ExploreRequest
+
 
 
 # ============================================================
@@ -37,10 +39,6 @@ from pywinauto.keyboard import send_keys
 # ============================================================
 
 APP_TITLE_RE = r".*MetaStock.*"
-
-# Use a search string that uniquely filters the target strategy.
-TARGET_STRATEGY_NAME = "#Stoch and RSI"
-# TARGET_STRATEGY_NAME = "#Bounce 25/50/100 AIO Revised"
 
 MAX_EXECUTION_WAIT_SEC = 300
 CLICK_EXIT_AFTER_DONE = False
@@ -537,6 +535,7 @@ def select_strategy_by_search_then_coordinate(main: BaseWrapper, strategy_name: 
         "Either the click missed, the list did not filter correctly, or UI did not refresh."
     )
 
+
 # ============================================================
 # INSTRUMENT SELECTION
 # ============================================================
@@ -588,7 +587,7 @@ def find_instruments_tree_item(main: BaseWrapper) -> BaseWrapper:
 
             combined = f"{name} {class_name} {control_type}"
 
-            # Stable signal from your Inspect output.
+            # Stable signal from Inspect output.
             if "InstrumentListTypesTVM" not in combined:
                 continue
 
@@ -597,7 +596,6 @@ def find_instruments_tree_item(main: BaseWrapper) -> BaseWrapper:
                 continue
 
             # This row should be in the left Explore Console area.
-            # Do not require exact y because layout/scaling can shift.
             if r.left > 350:
                 continue
 
@@ -633,7 +631,9 @@ def find_instruments_tree_item(main: BaseWrapper) -> BaseWrapper:
             if any(parse_selected_total_text(t) is not None for t in child_texts):
                 score += 5
 
-            candidates.append((score, r.top, r.left, item, child_texts, r, name, class_name, control_type))
+            candidates.append(
+                (score, r.top, r.left, item, child_texts, r, name, class_name, control_type)
+            )
 
         except Exception:
             continue
@@ -738,15 +738,17 @@ def click_instruments_checkbox_from_tree_item(item: BaseWrapper) -> None:
 
 def ensure_instrument_checked(main: BaseWrapper) -> None:
     """
-    Ensure Instruments is selected without stateless toggling.
+    Ensure Instruments is selected without unsafe stateless toggling.
 
-    Uses the exposed Instruments row count:
-        0 of 784      -> not selected
-        784 of 784    -> already selected
+    Handles three states:
+        0 of 784      -> unchecked
+        778 of 784    -> partially checked
+        784 of 784    -> fully checked
 
-    Behavior:
-        already selected -> do nothing
-        not selected     -> click once and verify
+    Important:
+    In WPF tri-state checkbox behavior, clicking a partially checked parent
+    may toggle it to unchecked first. If that happens, click again to move
+    from unchecked to checked.
     """
     try:
         item = find_instruments_tree_item(main)
@@ -765,42 +767,128 @@ def ensure_instrument_checked(main: BaseWrapper) -> None:
         if total <= 0:
             raise RuntimeError(f"Invalid Instruments total count: {before}")
 
+        if selected > total:
+            raise RuntimeError(f"Invalid Instruments selected/total count: {before}")
+
         if selected == total:
             log("Instruments already fully selected. Proceeding without clicking.")
             return
 
-        if selected > total:
-            raise RuntimeError(f"Invalid Instruments selected/total count: {before}")
+        # Case 1: completely unchecked.
+        if selected == 0:
+            log("Instruments fully unchecked. Clicking once to select all...")
+            click_instruments_checkbox_from_tree_item(item)
 
-        log("Instruments not fully selected. Clicking checkbox once...")
-        click_instruments_checkbox_from_tree_item(item)
+            item = find_instruments_tree_item(main)
+            after = get_instruments_selected_total(item)
+            log(f"Instruments selected count after click: {after}")
 
-        # Re-find item after click because WPF may refresh the row.
-        item = find_instruments_tree_item(main)
-        after = get_instruments_selected_total(item)
+            if after is None:
+                raise RuntimeError(
+                    "Clicked Instruments checkbox, but could not verify selected/total count."
+                )
 
-        log(f"Instruments selected count after: {after}")
+            selected_after, total_after = after
 
-        if after is None:
+            if total_after > 0 and selected_after == total_after:
+                log("Instruments is now fully selected.")
+                return
+
             raise RuntimeError(
-                "Clicked Instruments checkbox, but could not verify selected/total count after click."
+                f"Clicked unchecked Instruments, but it did not become fully selected. "
+                f"Before={before}, After={after}"
             )
 
-        selected_after, total_after = after
+        # Case 2: partially checked.
+        # Example: 778 of 784.
+        #
+        # In many WPF tri-state checkboxes:
+        # partial -> unchecked -> checked
+        #
+        # So we may need two clicks.
+        log(
+            "Instruments is partially selected. "
+            "Clicking once and checking whether it becomes full or unchecked..."
+        )
 
-        if total_after > 0 and selected_after == total_after:
+        click_instruments_checkbox_from_tree_item(item)
+
+        item = find_instruments_tree_item(main)
+        after_first = get_instruments_selected_total(item)
+        log(f"Instruments selected count after first partial-state click: {after_first}")
+
+        if after_first is None:
+            raise RuntimeError(
+                "Clicked partially selected Instruments, but could not verify state after first click."
+            )
+
+        selected_first, total_first = after_first
+
+        if total_first <= 0:
+            raise RuntimeError(f"Invalid Instruments total after first click: {after_first}")
+
+        if selected_first == total_first:
             log("Instruments is now fully selected.")
             return
 
+        if selected_first == 0:
+            log(
+                "Partial-state click toggled Instruments to unchecked. "
+                "Clicking once more to select all..."
+            )
+
+            click_instruments_checkbox_from_tree_item(item)
+
+            item = find_instruments_tree_item(main)
+            after_second = get_instruments_selected_total(item)
+            log(f"Instruments selected count after second click: {after_second}")
+
+            if after_second is None:
+                raise RuntimeError(
+                    "Clicked unchecked Instruments, but could not verify state after second click."
+                )
+
+            selected_second, total_second = after_second
+
+            if total_second > 0 and selected_second == total_second:
+                log("Instruments is now fully selected.")
+                return
+
+            raise RuntimeError(
+                f"Second click did not fully select Instruments. "
+                f"Before={before}, AfterFirst={after_first}, AfterSecond={after_second}"
+            )
+
+        # Still partial after one click.
         raise RuntimeError(
-            f"Clicked Instruments checkbox, but it is still not fully selected. "
-            f"Before={before}, After={after}"
+            f"Instruments remained partially selected after click. "
+            f"Before={before}, AfterFirst={after_first}"
         )
 
     except Exception as e:
         raise RuntimeError(
             f"Failed to ensure Instruments is checked without toggling: {e}"
         )
+
+
+def ensure_named_instruments_checked(
+    main: BaseWrapper,
+    instrument_names: list[str],
+) -> None:
+    """
+    Placeholder for future multiple/named instrument selection.
+
+    Current Phase 1 POI only supports the broad 'all instruments' selection
+    through InstrumentListTypesTVM.
+
+    Do not silently ignore named instruments, because that would make the CLI
+    look more capable than the automation actually is.
+    """
+    raise NotImplementedError(
+        "Named/multiple instrument selection is not implemented yet. "
+        f"Requested instruments: {instrument_names}. "
+        "Use --all-instruments for the current Phase 1 MVP."
+    )
 
 
 # ============================================================
@@ -1082,7 +1170,10 @@ def print_control_summary(main: BaseWrapper) -> None:
                         texts.append(txt)
                 except Exception:
                     pass
-            print(f"TREEITEM name={name!r}, children={texts}, rect=({r.left},{r.top},{r.right},{r.bottom})")
+            print(
+                f"TREEITEM name={name!r}, children={texts}, "
+                f"rect=({r.left},{r.top},{r.right},{r.bottom})"
+            )
         except Exception:
             pass
 
@@ -1092,7 +1183,10 @@ def print_control_summary(main: BaseWrapper) -> None:
             r = b.rectangle()
             name = normalize_text(b.element_info.name or "")
             text = normalize_text(b.window_text())
-            print(f"BUTTON name={name!r}, text={text!r}, rect=({r.left},{r.top},{r.right},{r.bottom})")
+            print(
+                f"BUTTON name={name!r}, text={text!r}, "
+                f"rect=({r.left},{r.top},{r.right},{r.bottom})"
+            )
         except Exception:
             pass
 
@@ -1103,7 +1197,10 @@ def print_control_summary(main: BaseWrapper) -> None:
             name = normalize_text(c.element_info.name or "")
             text = normalize_text(c.window_text())
             cls = normalize_text(c.element_info.class_name or "")
-            print(f"COMBO name={name!r}, text={text!r}, class={cls!r}, rect=({r.left},{r.top},{r.right},{r.bottom})")
+            print(
+                f"COMBO name={name!r}, text={text!r}, class={cls!r}, "
+                f"rect=({r.left},{r.top},{r.right},{r.bottom})"
+            )
         except Exception:
             pass
 
@@ -1113,7 +1210,10 @@ def print_control_summary(main: BaseWrapper) -> None:
             r = lv.rectangle()
             name = normalize_text(lv.element_info.name or "")
             text = normalize_text(lv.window_text())
-            print(f"LIST name={name!r}, text={text!r}, rect=({r.left},{r.top},{r.right},{r.bottom})")
+            print(
+                f"LIST name={name!r}, text={text!r}, "
+                f"rect=({r.left},{r.top},{r.right},{r.bottom})"
+            )
         except Exception:
             pass
 
@@ -1122,14 +1222,21 @@ def print_control_summary(main: BaseWrapper) -> None:
 # MAIN WORKFLOW
 # ============================================================
 
-def run_phase1_explore() -> None:
+def run_phase1_explore(request: ExploreRequest) -> None:
+    global MAX_EXECUTION_WAIT_SEC
+
+    MAX_EXECUTION_WAIT_SEC = request.max_execution_wait_sec
+
     main = connect_metastock()
 
     open_explore_panel(main)
 
-    select_strategy_by_search_then_coordinate(main, TARGET_STRATEGY_NAME)
+    select_strategy_by_search_then_coordinate(main, request.strategy_name)
 
-    ensure_instrument_checked(main)
+    if request.select_all_instruments:
+        ensure_instrument_checked(main)
+    else:
+        ensure_named_instruments_checked(main, request.instrument_names or [])
 
     start_exploration(main)
 
@@ -1139,9 +1246,15 @@ def run_phase1_explore() -> None:
     log("Done. MetaStock results should now be visible.")
 
 
+def main() -> None:
+    receiver = CliRequestReceiver()
+    request = receiver.receive()
+    run_phase1_explore(request)
+
+
 if __name__ == "__main__":
     try:
-        run_phase1_explore()
+        main()
     except Exception as e:
         log(f"FAILED: {e}")
         raise
