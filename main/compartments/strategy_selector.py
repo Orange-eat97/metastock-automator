@@ -1,3 +1,5 @@
+# strategy_selector.py
+
 from __future__ import annotations
 
 from pywinauto.base_wrapper import BaseWrapper
@@ -18,7 +20,8 @@ class StrategySelector:
     This class contains the strategy-selection state machine:
     - read current search box
     - search target strategy if needed
-    - click first filtered checkbox
+    - locate the unique filtered strategy row
+    - click the row's checkbox area
     - verify using Selected:n
     - repair if the click accidentally untoggled an already-selected strategy
     """
@@ -34,7 +37,7 @@ class StrategySelector:
         self.search_filter_timeout = search_filter_timeout
 
     def select(self, main: BaseWrapper, strategy_name: str) -> None:
-        self.select_by_search_then_coordinate(main, strategy_name)
+        self.select_by_search(main, strategy_name)
 
     def get_search_combobox_text(self, search_box: BaseWrapper) -> str:
         """
@@ -81,26 +84,50 @@ class StrategySelector:
             error_msg="Strategy list did not become ready after search",
         )
 
-    def click_first_filtered_strategy_checkbox(self, main: BaseWrapper) -> None:
+    def click_strategy_checkbox(
+        self,
+        main: BaseWrapper,
+        strategy_name: str,
+    ) -> None:
         """
-        Click first visible strategy checkbox after search.
+        Click the checkbox area for the unique filtered strategy row.
 
-        Still uses the existing list-relative coordinate fallback.
-        Later improvement: replace this with row/control-based checkbox lookup.
+        We do not match strategy_name against row text because Inspect.exe showed
+        the searched display name is not exposed in UIA. The row exposes:
+        - generic ExplorationVM name
+        - HelpText strategy description
+
+        If no real checkbox is exposed, click relative to the discovered ListBoxItem row.
         """
-        list_view = self.selectors.find_strategy_list_view(main)
-        r = list_view.rectangle()
+        row = self.selectors.find_unique_filtered_strategy_row(main)
+        checkbox = self.selectors.find_checkbox_in_row(row)
 
-        # Existing known relative offset:
-        # strategy list rect ~= (86,196,599,508)
-        # first checkbox center ~= (108,221)
-        self.actions.click_point(
-            r.left + 22,
-            r.top + 25,
-            "first filtered strategy checkbox",
+        if checkbox is not None:
+            log(f"Clicking real checkbox for strategy {strategy_name!r}.")
+            self.actions.click_control(
+                checkbox,
+                f"strategy checkbox: {strategy_name}",
+            )
+            return
+
+        r = row.rectangle()
+        log(
+            f"Strategy row found but checkbox is not exposed through UIA. "
+            f"Using row-relative checkbox click. "
+            f"Row rect=({r.left},{r.top},{r.right},{r.bottom})"
         )
 
-    def select_by_search_then_coordinate(
+        # Inspect row example:
+        # row rect={l:91 t:201 r:400 b:249}
+        # old working checkbox point around x=108, y=221
+        # offset ~= 17, so use 20.
+        self.actions.click_checkbox_in_row(
+            row,
+            label=f"strategy {strategy_name!r}",
+            x_offset=20,
+        )
+
+    def select_by_search(
         self,
         main: BaseWrapper,
         strategy_name: str,
@@ -108,12 +135,12 @@ class StrategySelector:
         """
         Stateful strategy selection.
 
-        Preserves your current working behavior:
+        Behavior:
         1. Check current SearchComboBox before searching.
         2. If already filtered to target and Selected:n > 0, do nothing.
         3. Otherwise search target and use selected-count repair.
         """
-        log(f"Selecting strategy through search + stateful coordinate click: {strategy_name!r}")
+        log(f"Selecting strategy through search + row/control checkbox click: {strategy_name!r}")
 
         search_box = self.selectors.find_search_combobox(main)
         current_search_text = self.get_search_combobox_text(search_box)
@@ -136,7 +163,7 @@ class StrategySelector:
 
             if selected_initial == 0:
                 log("Target strategy appears unselected. Clicking once...")
-                self.click_first_filtered_strategy_checkbox(main)
+                self.click_strategy_checkbox(main, strategy_name)
 
                 selected_after_text = get_selected_count_text(main)
                 selected_after = parse_selected_count(selected_after_text)
@@ -169,7 +196,7 @@ class StrategySelector:
                 "Refusing to do stateless toggle."
             )
 
-        self.click_first_filtered_strategy_checkbox(main)
+        self.click_strategy_checkbox(main, strategy_name)
 
         selected_after_text = get_selected_count_text(main)
         selected_after = parse_selected_count(selected_after_text)
@@ -192,7 +219,7 @@ class StrategySelector:
                 "Clicking again to restore checked state..."
             )
 
-            self.click_first_filtered_strategy_checkbox(main)
+            self.click_strategy_checkbox(main, strategy_name)
 
             selected_restore_text = get_selected_count_text(main)
             selected_restore = parse_selected_count(selected_restore_text)

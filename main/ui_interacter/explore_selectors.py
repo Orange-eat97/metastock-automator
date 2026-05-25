@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Optional
+
 from pywinauto import Desktop
 from pywinauto.base_wrapper import BaseWrapper
 
@@ -119,6 +120,7 @@ class ExploreSelectors:
                 name = normalize_text(lv.element_info.name or "")
                 text = normalize_text(lv.window_text())
 
+                # Strategy list is large and on the left side.
                 if r.width() > 250 and r.height() > 120 and r.left < 750:
                     candidates.append((r.top, r.left, lv, name, text, r))
             except Exception:
@@ -131,8 +133,167 @@ class ExploreSelectors:
 
         chosen = candidates[0][2]
         r = chosen.rectangle()
+
         log(f"Using strategy list view rect=({r.left},{r.top},{r.right},{r.bottom})")
         return chosen
+
+    def find_filtered_strategy_rows(self, main: BaseWrapper) -> list[BaseWrapper]:
+        """
+        Find strategy ListBoxItem rows after the search filter is applied.
+
+        Inspect.exe showed each strategy result is exposed as:
+            ControlType: ListItem
+            ClassName: ListBoxItem
+            Name: IMA.Presentation...ExplorationVM
+            HelpText: strategy description/formula
+            Children: none
+            TogglePattern: unavailable
+
+        The searched display name, e.g. '#Stoch and RSI', is not exposed as row text.
+        """
+        list_view = self.find_strategy_list_view(main)
+        list_rect = list_view.rectangle()
+
+        candidates: list[tuple[int, int, int, BaseWrapper, str]] = []
+
+        try:
+            descendants = list_view.descendants()
+        except Exception:
+            descendants = []
+
+        for ctrl in descendants:
+            try:
+                info = ctrl.element_info
+                r = ctrl.rectangle()
+
+                control_type = normalize_text(info.control_type or "")
+                class_name = normalize_text(info.class_name or "")
+                name = normalize_text(info.name or "")
+                help_text = normalize_text(getattr(info, "help_text", "") or "")
+
+                is_strategy_item = (
+                    control_type == "ListItem"
+                    or class_name == "ListBoxItem"
+                    or "ExplorationVM" in name
+                )
+
+                if not is_strategy_item:
+                    continue
+
+                # Must overlap the strategy list view.
+                if r.right < list_rect.left or r.left > list_rect.right:
+                    continue
+                if r.bottom < list_rect.top or r.top > list_rect.bottom:
+                    continue
+
+                # Avoid invalid/tiny elements.
+                if r.width() <= 20 or r.height() <= 8:
+                    continue
+
+                score = 0
+
+                if control_type == "ListItem":
+                    score += 30
+                if class_name == "ListBoxItem":
+                    score += 30
+                if "ExplorationVM" in name:
+                    score += 20
+                if help_text:
+                    score += 10
+
+                # Prefer row-sized items.
+                if 15 <= r.height() <= 80:
+                    score += 10
+
+                candidates.append((score, r.top, r.left, ctrl, help_text or name))
+
+            except Exception:
+                continue
+
+        candidates.sort(key=lambda x: (-x[0], x[1], x[2]))
+
+        rows = [ctrl for _, _, _, ctrl, _ in candidates]
+
+        log(f"Filtered strategy ListBoxItem candidate count: {len(rows)}")
+
+        for idx, (score, _, _, ctrl, desc) in enumerate(candidates[:10], start=1):
+            r = ctrl.rectangle()
+            log(
+                f"  strategy candidate {idx}: "
+                f"score={score}, rect=({r.left},{r.top},{r.right},{r.bottom}), "
+                f"description/name={desc!r}"
+            )
+
+        return rows
+
+    def find_unique_filtered_strategy_row(self, main: BaseWrapper) -> BaseWrapper:
+        """
+        Return the unique visible filtered strategy row.
+
+        Safety rule:
+        - 0 rows: fail
+        - 1 row: use it
+        - >1 rows: fail safely because the search term is not unique enough
+        """
+        rows = self.find_filtered_strategy_rows(main)
+
+        if not rows:
+            raise RuntimeError(
+                "No strategy ListBoxItem row found after search filtering. "
+                "The filtered list may not be loaded, or MetaStock did not expose the result row."
+            )
+
+        if len(rows) > 1:
+            raise RuntimeError(
+                f"Search result is ambiguous: found {len(rows)} strategy rows after filtering. "
+                "Use a more unique strategy search string before allowing automated selection."
+            )
+
+        row = rows[0]
+        r = row.rectangle()
+
+        log(
+            "Using unique filtered strategy row: "
+            f"rect=({r.left},{r.top},{r.right},{r.bottom})"
+        )
+
+        return row
+
+    def find_checkbox_in_row(self, row: BaseWrapper) -> Optional[BaseWrapper]:
+        """
+        Find a real CheckBox inside a row if UIA exposes one.
+
+        For strategy rows this probably returns None because Inspect.exe showed
+        ListBoxItem rows with no children and no TogglePattern. Still useful for
+        any UIA-exposed checkbox row.
+        """
+        def is_checkbox(ctrl: BaseWrapper) -> bool:
+            try:
+                info = ctrl.element_info
+                control_type = normalize_text(info.control_type or "")
+                class_name = normalize_text(info.class_name or "")
+                name = normalize_text(info.name or "")
+
+                combined = f"{control_type} {class_name} {name}".lower()
+                return "checkbox" in combined
+            except Exception:
+                return False
+
+        try:
+            for child in row.children():
+                if is_checkbox(child):
+                    return child
+        except Exception:
+            pass
+
+        try:
+            for child in row.descendants():
+                if is_checkbox(child):
+                    return child
+        except Exception:
+            pass
+
+        return None
 
     def find_instruments_tree_item(self, main: BaseWrapper) -> BaseWrapper:
         log("Searching for Instruments tree item...")
