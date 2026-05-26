@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from typing import Optional
 
-from requestReceiver import CliRequestReceiver
+import sys
+
+from requestReceiver import CliRequestReceiver, ExploreRequest
+from guiReceiver import GuiRequestReceiver
 
 from ui_interacter.ui_core import log
 from ui_interacter.ui_actions import UiActions
@@ -94,15 +97,26 @@ def build_workflow(max_execution_wait_sec: int) -> ExploreWorkflow:
     )
 
 
-def main() -> None:
-    receiver = CliRequestReceiver()
-    request = receiver.receive()
-
+def run_request(request: ExploreRequest) -> None:
     workflow = build_workflow(
         max_execution_wait_sec=request.max_execution_wait_sec,
     )
 
     workflow.run(request)
+
+
+def main() -> None:
+    if "--gui" in sys.argv:
+        # Remove --gui so argparse will not see it later.
+        sys.argv = [arg for arg in sys.argv if arg != "--gui"]
+
+        receiver = GuiRequestReceiver(run_callback=run_request)
+        receiver.receive()
+        return
+
+    receiver = CliRequestReceiver()
+    request = receiver.receive()
+    run_request(request)
 
 
 if __name__ == "__main__":
