@@ -6,6 +6,7 @@ from typing import Optional
 from pywinauto.base_wrapper import BaseWrapper
 
 from phase2RequestReceiver import AddExplorerRequest
+from compartments.column_editor import ColumnEditor
 from ui_interacter.ui_core import (
     log,
     normalize_text,
@@ -23,16 +24,16 @@ class ExplorerCreator:
         - wait for Exploration Editor
         - fill Name
         - fill Notes
-        - fill Code
+        - fill Filter code
+        - optionally define column tabs A/B/C...
         - click Ok
 
     This class deliberately does not:
         - connect to MetaStock
         - open the Explore Console
-        - define columns
         - run the exploration
 
-    Those are handled by other workflow/components.
+    Those are handled by automator.py / workflow components.
     """
 
     def __init__(
@@ -41,11 +42,13 @@ class ExplorerCreator:
         selectors=None,
         editor_load_timeout: int = 8,
         save_timeout: int = 10,
+        column_editor: ColumnEditor | None = None,
     ) -> None:
         self.actions = actions
         self.selectors = selectors
         self.editor_load_timeout = editor_load_timeout
         self.save_timeout = save_timeout
+        self.column_editor = column_editor or ColumnEditor(actions=actions)
 
     # ============================================================
     # PUBLIC API
@@ -68,11 +71,18 @@ class ExplorerCreator:
             ordinal_fallback=1,
         )
 
-        code_editor = self._find_code_editor(editor)
+        filter_code_editor = self._find_code_editor(editor)
 
         self.actions.paste_text(name_field, request.name, "explorer name")
         self.actions.paste_text(notes_field, request.notes, "explorer notes")
-        self.actions.paste_text(code_editor, request.code_body, "explorer code body")
+        self.actions.paste_text(
+            filter_code_editor,
+            request.code_body,
+            "explorer filter code body",
+        )
+
+        if request.columns:
+            self.column_editor.define_columns(editor, request.columns)
 
         self._save_editor(editor)
 
@@ -296,19 +306,24 @@ class ExplorerCreator:
         return None
 
     # ============================================================
-    # CODE EDITOR
+    # FILTER CODE EDITOR
     # ============================================================
 
     def _find_code_editor(self, editor: BaseWrapper) -> BaseWrapper:
         """
+        Finds the currently visible code editor.
+
+        When called from create(), the selected tab should still be Filter,
+        so this resolves the filter code editor.
+
         Earlier Inspect showed the code box as Document.
-        Your control tree showed Code followed by an unnamed Custom.
+        The control tree also showed Code followed by an unnamed Custom.
 
         So we support both:
             1. large visible Document after Code:
             2. large visible Custom after Code:
         """
-        log("Searching for Code editor...")
+        log("Searching for Filter code editor...")
 
         code_label = self._find_label_text(editor, "Code:")
 
@@ -320,7 +335,7 @@ class ExplorerCreator:
 
         if document is not None:
             r = document.rectangle()
-            log(f"Found Code editor as Document: rect=({r.left},{r.top},{r.right},{r.bottom})")
+            log(f"Found Filter code editor as Document: rect=({r.left},{r.top},{r.right},{r.bottom})")
             return document
 
         custom = self._find_large_control_after_label(
@@ -331,10 +346,10 @@ class ExplorerCreator:
 
         if custom is not None:
             r = custom.rectangle()
-            log(f"Found Code editor as Custom: rect=({r.left},{r.top},{r.right},{r.bottom})")
+            log(f"Found Filter code editor as Custom: rect=({r.left},{r.top},{r.right},{r.bottom})")
             return custom
 
-        raise RuntimeError("Could not find Code editor as Document or large Custom control.")
+        raise RuntimeError("Could not find Filter code editor as Document or large Custom control.")
 
     def _find_large_control_after_label(
         self,
