@@ -21,6 +21,22 @@ class UiActions:
         log(f"Clicking {label} at ({x}, {y})")
         ctrl.click_input()
 
+    def invoke_or_click(self, ctrl: BaseWrapper, label: str = "control") -> None:
+        """
+        Prefer UIA InvokePattern when available.
+        Fall back to physical click.
+        """
+        try:
+            log(f"Invoking {label}")
+            ctrl.invoke()
+            time.sleep(self.medium_delay)
+            return
+        except Exception:
+            pass
+
+        self.click_control(ctrl, label)
+        time.sleep(self.medium_delay)
+
     def click_point(self, x: int, y: int, label: str = "point") -> None:
         log(f"Clicking {label} at ({x}, {y})")
         mouse.click(button="left", coords=(x, y))

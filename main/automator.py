@@ -7,6 +7,9 @@ import sys
 from requestReceiver import CliRequestReceiver, ExploreRequest
 from guiReceiver import GuiRequestReceiver
 
+from phase2RequestReceiver import CliAddExplorerRequestReceiver, AddExplorerRequest
+from compartments.explorer_creator import ExplorerCreator
+
 from ui_interacter.ui_core import log
 from ui_interacter.ui_actions import UiActions
 from ui_interacter.explore_selectors import ExploreSelectors
@@ -42,15 +45,18 @@ START_FALLBACK_ABSOLUTE_XY: Optional[tuple[int, int]] = None
 
 
 # ============================================================
-# COMPOSITION ROOT
+# SHARED COMPOSITION
 # ============================================================
 
-def build_workflow(max_execution_wait_sec: int) -> ExploreWorkflow:
+def build_shared_components():
     """
-    Build and wire all Phase 1 components.
+    Build shared low-level components used by Phase 1 and Phase 2.
 
-    This function is the composition root:
-    it decides which concrete implementations the workflow uses.
+    This avoids duplicating:
+        - UiActions
+        - ExploreSelectors
+        - MetaStockApp
+        - ExploreConsole
     """
     actions = UiActions(
         short_delay=SHORT_DELAY,
@@ -70,6 +76,21 @@ def build_workflow(max_execution_wait_sec: int) -> ExploreWorkflow:
         allow_start_fallback_click=ALLOW_START_FALLBACK_CLICK,
         start_fallback_absolute_xy=START_FALLBACK_ABSOLUTE_XY,
     )
+
+    return actions, selectors, app, console
+
+
+# ============================================================
+# PHASE 1 COMPOSITION ROOT
+# ============================================================
+
+def build_workflow(max_execution_wait_sec: int) -> ExploreWorkflow:
+    """
+    Build and wire all Phase 1 components.
+
+    Preserved from the original automator.py.
+    """
+    actions, selectors, app, console = build_shared_components()
 
     strategy_selector = StrategySelector(
         actions=actions,
@@ -98,6 +119,11 @@ def build_workflow(max_execution_wait_sec: int) -> ExploreWorkflow:
 
 
 def run_request(request: ExploreRequest) -> None:
+    """
+    Phase 1 runner.
+
+    Preserved so GUI mode and old CLI behavior continue to work.
+    """
     workflow = build_workflow(
         max_execution_wait_sec=request.max_execution_wait_sec,
     )
@@ -105,7 +131,91 @@ def run_request(request: ExploreRequest) -> None:
     workflow.run(request)
 
 
+# ============================================================
+# PHASE 2 COMPOSITION / RUNNERS
+# ============================================================
+
+def run_add_request(request: AddExplorerRequest) -> None:
+    """
+    Phase 2 runner:
+        connect -> open Explore Console -> create explorer
+
+    Does not run exploration.
+    """
+    actions, selectors, app, console = build_shared_components()
+
+    creator = ExplorerCreator(
+        actions=actions,
+        selectors=selectors,
+    )
+
+    main_window = app.connect()
+    console.open(main_window)
+    creator.create(main_window, request)
+
+
+def run_add_and_run_request(request: AddExplorerRequest) -> None:
+    """
+    Integrated Phase 2 + Phase 1 runner:
+        add explorer -> run newly added explorer
+
+    This depends on phase2RequestReceiver setting:
+        request.strategy_name = request.name
+
+    So Phase 1 can receive the Phase 2 request object.
+    """
+    run_add_request(request)
+
+    workflow = build_workflow(
+        max_execution_wait_sec=request.max_execution_wait_sec,
+    )
+
+    workflow.run(request)
+
+
+# ============================================================
+# CLI MODE ROUTER
+# ============================================================
+
+def pop_mode_from_argv() -> str:
+    """
+    Supports both old and new CLI styles.
+
+    Old Phase 1 style, still valid:
+        python automator.py --strategy "#Stoch and RSI" --all-instruments
+
+    New explicit Phase 1:
+        python automator.py run --strategy "#Stoch and RSI" --all-instruments
+
+    Phase 2 add only:
+        python automator.py add --name "#My Test" --code-file "..\\test explorer code.txt"
+
+    Phase 2 add then run:
+        python automator.py add-and-run --name "#My Test" --code-file "..\\test explorer code.txt" --all-instruments
+    """
+    if len(sys.argv) <= 1:
+        return "run"
+
+    first_arg = sys.argv[1].strip().lower()
+
+    if first_arg in {"run", "add", "add-and-run"}:
+        # Remove the mode token so the existing argparse receivers
+        # can parse the remaining arguments normally.
+        sys.argv = [sys.argv[0]] + sys.argv[2:]
+        return first_arg
+
+    # Backward compatibility:
+    # if first arg is --strategy, --gui, etc., use old Phase 1 behavior.
+    return "run"
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
 def main() -> None:
+    # Preserve existing GUI behavior.
+    # GUI currently runs Phase 1 only.
     if "--gui" in sys.argv:
         # Remove --gui so argparse will not see it later.
         sys.argv = [arg for arg in sys.argv if arg != "--gui"]
@@ -114,9 +224,27 @@ def main() -> None:
         receiver.receive()
         return
 
-    receiver = CliRequestReceiver()
-    request = receiver.receive()
-    run_request(request)
+    mode = pop_mode_from_argv()
+
+    if mode == "run":
+        receiver = CliRequestReceiver()
+        request = receiver.receive()
+        run_request(request)
+        return
+
+    if mode == "add":
+        receiver = CliAddExplorerRequestReceiver()
+        request = receiver.receive()
+        run_add_request(request)
+        return
+
+    if mode == "add-and-run":
+        receiver = CliAddExplorerRequestReceiver()
+        request = receiver.receive()
+        run_add_and_run_request(request)
+        return
+
+    raise ValueError(f"Unsupported automator mode: {mode!r}")
 
 
 if __name__ == "__main__":
