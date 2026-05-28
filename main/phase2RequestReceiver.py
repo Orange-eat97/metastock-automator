@@ -1,11 +1,28 @@
 from __future__ import annotations
 
+import re
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
 from requestReceiver import RequestReceiver, parse_instruments_text
+
+
+@dataclass(frozen=True)
+class ExplorerColumn:
+    """
+    One column definition.
+
+    slot is user-facing only:
+        A, B, C...
+
+    Internally, automation uses column order:
+        A = first column tab after Filter
+        B = second column tab after Filter
+    """
+    slot: str
+    code_body: str
 
 
 @dataclass(frozen=True)
@@ -16,7 +33,6 @@ class AddExplorerRequest:
     Preserves Phase 1 exploration fields so the same object can later be used by:
         - add
         - add-and-run
-        - run existing explorer
 
     For a newly added explorer:
         strategy_name == name
@@ -27,8 +43,11 @@ class AddExplorerRequest:
     notes: str
     code_body: str
 
+    # Optional column definitions
+    columns: list[ExplorerColumn] = field(default_factory=list)
+
     # Phase 1-compatible fields
-    strategy_name: str
+    strategy_name: str = ""
     instrument_names: Optional[list[str]] = None
     select_all_instruments: bool = True
     max_execution_wait_sec: int = 300
@@ -37,25 +56,96 @@ class AddExplorerRequest:
     run_after_add: bool = False
 
 
+def parse_column_definitions_text(text: str) -> list[ExplorerColumn]:
+    """
+    Parses one text file containing column definitions like:
+
+        col A = CLOSE
+        col B = VOLUME
+        col C = Sum(((H=C) AND (V>Mov(V,256,S))),10)
+
+    Important:
+        We do NOT split by comma because MetaStock formulas contain commas.
+        We split by markers like:
+            col A =
+            col B =
+            col C =
+    """
+    raw = text or ""
+
+    pattern = re.compile(
+        r"(?im)\bcol\s+([A-Z])\s*=",
+    )
+
+    matches = list(pattern.finditer(raw))
+
+    if not matches:
+        raise ValueError(
+            "No column definitions found. Expected format like: col A = CLOSE"
+        )
+
+    columns: list[ExplorerColumn] = []
+
+    for i, match in enumerate(matches):
+        slot = match.group(1).upper()
+        start = match.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(raw)
+
+        code_body = raw[start:end].strip()
+
+        # Allow users to write:
+        #   col A = CLOSE,
+        #   col B = VOLUME,
+        # But do not remove commas inside formulas.
+        if code_body.endswith(","):
+            code_body = code_body[:-1].rstrip()
+
+        if not code_body:
+            raise ValueError(f"Column {slot} has empty code body.")
+
+        columns.append(
+            ExplorerColumn(
+                slot=slot,
+                code_body=code_body,
+            )
+        )
+
+    # Sort by slot order A, B, C...
+    columns.sort(key=lambda c: ord(c.slot) - ord("A"))
+
+    # Safety check: our UI automation currently maps by order.
+    # So we should avoid gaps like A, C without B.
+    expected_slots = [chr(ord("A") + i) for i in range(len(columns))]
+    actual_slots = [c.slot for c in columns]
+
+    if actual_slots != expected_slots:
+        raise ValueError(
+            "Column slots must start from A and be continuous because UI automation "
+            f"uses tab order. Expected {expected_slots}, got {actual_slots}."
+        )
+
+    return columns
+
 class CliAddExplorerRequestReceiver(RequestReceiver):
     """
-    Temporary Phase 2 CLI receiver.
-
-    It extends Phase 1's request logic instead of replacing it.
+    Phase 2 CLI receiver.
 
     Examples:
 
         Add only:
-            python phase2_add_explorer.py --name "#My Test" --notes "test" --code "C > Ref(C,-1)"
+            python automator.py add --name "#My Test" --notes "test" --code "C > Ref(C,-1)"
 
-        Add with Phase 1 all-instruments logic:
-            python phase2_add_explorer.py --name "#My Test" --code-file explorer_code.txt --all-instruments
+        Add with filter code file:
+            python automator.py add --name "#My Test" --notes "test" --code-file "..\\test explorer code.txt"
 
-        Add with specific instruments:
-            python phase2_add_explorer.py --name "#My Test" --code-file explorer_code.txt --instrument SGX --instrument NASDAQ
+        Add with column A:
+            python automator.py add --name "#My Test" --code-file "..\\filter.txt" --column-code-file "..\\column_a.txt"
 
-        Add with comma-separated instruments:
-            python phase2_add_explorer.py --name "#My Test" --code-file explorer_code.txt --instruments "SGX,NASDAQ"
+        Add with columns A and B:
+            python automator.py add --name "#My Test" --code-file "..\\filter.txt" --column-code-file "..\\column_a.txt" --column-code-file "..\\column_b.txt"
+
+        Add and run:
+            python automator.py add-and-run --name "#My Test" --code-file "..\\filter.txt" --all-instruments
     """
 
     def receive(self) -> AddExplorerRequest:
@@ -89,6 +179,15 @@ class CliAddExplorerRequestReceiver(RequestReceiver):
         code_group.add_argument(
             "--code-file",
             help="Path to a text file containing the explorer filter code body.",
+        )
+
+        parser.add_argument(
+            "--columns-file",
+            default=None,
+            help=(
+                "Path to one text file containing column definitions. "
+                "Example format: col A = CLOSE, col B = VOLUME, col C = Mov(C,20,S)"
+            ),
         )
 
         # ============================================================
@@ -163,6 +262,25 @@ class CliAddExplorerRequestReceiver(RequestReceiver):
             raise ValueError("Explorer code body cannot be empty.")
 
         # ============================================================
+        # Parse optional column code files
+        # ============================================================
+
+        columns: list[ExplorerColumn] = []
+
+        if args.columns_file:
+            columns_path = Path(args.columns_file)
+
+            if not columns_path.exists():
+                raise FileNotFoundError(f"Columns file does not exist: {columns_path}")
+
+            columns_text = columns_path.read_text(encoding="utf-8")
+
+            if not columns_text.strip():
+                raise ValueError(f"Columns file is empty: {columns_path}")
+
+            columns = parse_column_definitions_text(columns_text)
+
+        # ============================================================
         # Preserve Phase 1 instrument-selection logic exactly
         # ============================================================
 
@@ -182,6 +300,7 @@ class CliAddExplorerRequestReceiver(RequestReceiver):
             name=name,
             notes=notes,
             code_body=code_body,
+            columns=columns,
 
             # Phase 1-compatible values
             strategy_name=name,
