@@ -26,7 +26,7 @@ from compartments.explore_workflow import ExploreWorkflow
 # CONFIG
 # ============================================================
 
-APP_TITLE_RE = r".*MetaStock.*"
+APP_TITLE_RE = r"^Main - MetaStock$"
 
 MAX_EXECUTION_WAIT_SEC = 300
 CLICK_EXIT_AFTER_DONE = False
@@ -220,7 +220,11 @@ def main() -> None:
         # Remove --gui so argparse will not see it later.
         sys.argv = [arg for arg in sys.argv if arg != "--gui"]
 
-        receiver = GuiRequestReceiver(run_callback=run_request)
+        receiver = GuiRequestReceiver(
+            run_callback=run_request,
+            add_callback=run_add_request,
+            add_and_run_callback=run_add_and_run_request,
+        )
         receiver.receive()
         return
 
