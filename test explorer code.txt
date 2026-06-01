@@ -1,0 +1,55 @@
+Mov(C,20,E) > Mov(C,40,E)
+
+AND
+
+Mov(C,50,S) > Mov(C,150,S)
+
+AND (
+
+LLV(C,3) > Mov(C,25,S) AND LLV(C,3) < 1.015*Mov(C,25,S)
+
+OR
+
+LLV(C,3) > Mov(C,50,S) AND LLV(C,3) < 1.015*Mov(C,50,S)
+
+OR
+
+LLV(C,3) > Mov(C,100,S) AND LLV(C,3) < 1.015*Mov(C,100,S)
+
+OR
+
+LLV(C,3) > Mov(C,150,S) AND LLV(C,3) < 1.015*Mov(C,150,S)
+
+OR
+
+LLV(C,3) > Mov(C,200,S) AND LLV(C,3) < 1.015*Mov(C,200,S)
+
+)
+
+AND
+
+{C < HHV(C,126)
+
+AND 
+
+C > 0.75*HHV(C,126)
+
+AND
+
+C > LLV(C,126)
+
+AND 
+
+C > 0.75*LLV(C,126)
+
+AND}
+
+((HHV(C,63) - LLV(C,63)) / LLV(C,126)) > 0.10
+
+AND
+
+V > 50000 AND Ref(V,-1) > 50000 AND Ref(V,-2) > 50000
+
+AND
+
+V > Mov(V,63,E)

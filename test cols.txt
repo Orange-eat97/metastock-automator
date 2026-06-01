@@ -1,0 +1,7 @@
+col A = CLOSE
+col B = VOLUME
+col C = Sum(((H=C) AND (L=O) AND (C>O) AND (V>Mov(V,256,S))),10)
+col D = Sum(((((H-L)/(O-L))>10) AND (H=C) AND (O>L) AND (C>O) AND (V>Mov(V,256,S))),10)
+col E = Sum((((((H-C)/(H-L))*100<15) AND (((H-L)/(Abs(Min((H-C),(O-L)))))>10) AND (C>O) AND (H>C) AND (O>L) AND (V>Mov(V,256,S)))),10)
+col F = Sum(((H=C) AND (H=O) AND (V>Mov(V,256,S))),10)
+col G = Sum((((((H-C)/(H-L))*100<15) AND (((H-L)/(Abs(Min((H-O),(C-L)))))>10) AND (O>C) AND (H>C) AND (C>L) AND (V>Mov(V,256,S)))),10)
