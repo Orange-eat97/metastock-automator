@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+
 import pyperclip
 from pywinauto import mouse
 from pywinauto.base_wrapper import BaseWrapper
@@ -12,50 +13,104 @@ from ui_interacter.ui_core import log, rect_center
 
 
 class UiActions:
-    def __init__(self, short_delay: float = 0.15, medium_delay: float = 0.35):
-        self.short_delay = short_delay
-        self.medium_delay = medium_delay
+    def __init__(
+        self,
+        click_settle_delay: float = 0.03,
+        text_settle_delay: float = 0.08,
+        key_delay: float = 0.01,
+    ) -> None:
+        self.click_settle_delay = click_settle_delay
+        self.text_settle_delay = text_settle_delay
+        self.key_delay = key_delay
 
-    def click_control(self, ctrl: BaseWrapper, label: str = "control") -> None:
+    def click_control(
+        self,
+        ctrl: BaseWrapper,
+        label: str = "control",
+    ) -> None:
         x, y = rect_center(ctrl)
+
         log(f"Clicking {label} at ({x}, {y})")
+
         ctrl.click_input()
 
-    def invoke_or_click(self, ctrl: BaseWrapper, label: str = "control") -> None:
+        # Only allow Windows to dispatch the input event.
+        # The caller must wait for the expected UI state.
+        time.sleep(self.click_settle_delay)
+
+    def invoke_or_click(
+        self,
+        ctrl: BaseWrapper,
+        label: str = "control",
+    ) -> None:
         """
-        Prefer UIA InvokePattern when available.
-        Fall back to physical click.
+        Prefer UIA InvokePattern and fall back to physical input.
+
+        This method performs only a tiny event-dispatch wait.
+        Business-level state changes must be verified by callers.
         """
         try:
             log(f"Invoking {label}")
             ctrl.invoke()
-            time.sleep(self.medium_delay)
+            time.sleep(self.click_settle_delay)
             return
+
         except Exception:
-            pass
+            self.click_control(
+                ctrl,
+                label,
+            )
 
-        self.click_control(ctrl, label)
-        time.sleep(self.medium_delay)
-
-    def click_point(self, x: int, y: int, label: str = "point") -> None:
+    def click_point(
+        self,
+        x: int,
+        y: int,
+        label: str = "point",
+    ) -> None:
         log(f"Clicking {label} at ({x}, {y})")
-        mouse.click(button="left", coords=(x, y))
-        time.sleep(self.medium_delay)
 
-    def paste_text(self, ctrl: BaseWrapper, text: str, label: str = "text field") -> None:
+        mouse.click(
+            button="left",
+            coords=(x, y),
+        )
+
+        time.sleep(self.click_settle_delay)
+
+    def paste_text(
+        self,
+        ctrl: BaseWrapper,
+        text: str,
+        label: str = "text field",
+    ) -> None:
+        """
+        Paste text with minimal keyboard-event delays.
+
+        The caller must wait for the resulting filtered list,
+        selected count, dialog, or other expected state.
+        """
         log(f"Pasting into {label}: {text!r}")
 
         ctrl.click_input()
-        time.sleep(self.short_delay)
+        time.sleep(self.click_settle_delay)
 
         pyperclip.copy(text)
-        send_keys("^a")
-        time.sleep(0.05)
-        send_keys("{BACKSPACE}")
-        time.sleep(0.05)
-        send_keys("^v")
 
-        time.sleep(self.medium_delay)
+        send_keys(
+            "^a",
+            pause=self.key_delay,
+        )
+        send_keys(
+            "{BACKSPACE}",
+            pause=self.key_delay,
+        )
+        send_keys(
+            "^v",
+            pause=self.key_delay,
+        )
+
+        # WPF text binding/filtering usually needs slightly longer
+        # than a normal button click.
+        time.sleep(self.text_settle_delay)
 
     def click_checkbox_in_row(
         self,
@@ -64,19 +119,30 @@ class UiActions:
         x_offset: int = 22,
     ) -> None:
         """
-        Controlled fallback.
-
-        This is still coordinate-based, but it is now isolated.
-        Business logic should call this only after failing to find a real checkbox control.
+        Controlled coordinate fallback for rows whose checkbox
+        is not exposed through UIA.
         """
-        r = row.rectangle()
-        x = r.left + x_offset
-        y = (r.top + r.bottom) // 2
+        rectangle = row.rectangle()
+
+        x = rectangle.left + x_offset
+        y = (
+            rectangle.top
+            + rectangle.bottom
+        ) // 2
 
         log(
-            f"Fallback clicking checkbox in {label} row using rect="
-            f"({r.left},{r.top},{r.right},{r.bottom}), point=({x},{y})"
+            f"Fallback clicking checkbox in {label} row "
+            f"using rect=("
+            f"{rectangle.left},"
+            f"{rectangle.top},"
+            f"{rectangle.right},"
+            f"{rectangle.bottom}), "
+            f"point=({x},{y})"
         )
 
-        mouse.click(button="left", coords=(x, y))
-        time.sleep(self.medium_delay)
+        mouse.click(
+            button="left",
+            coords=(x, y),
+        )
+
+        time.sleep(self.click_settle_delay)

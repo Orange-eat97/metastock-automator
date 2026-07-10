@@ -6,8 +6,14 @@ from pywinauto.base_wrapper import BaseWrapper
 
 from ui_interacter.ui_actions import UiActions
 from ui_interacter.explore_selectors import ExploreSelectors
-from ui_interacter.ui_core import log, normalize_text, wait_until
+from ui_interacter.ui_core import (
+    log,
+    normalize_text,
+    wait_until,
+    wait_until_stable,
+)
 from ui_interacter.state_readers import (
+    get_selected_count,
     get_selected_count_text,
     parse_selected_count,
 )
@@ -133,109 +139,193 @@ class StrategySelector:
         strategy_name: str,
     ) -> None:
         """
-        Stateful strategy selection.
+        Deterministic strategy-selection sequence:
 
-        Behavior:
-        1. Check current SearchComboBox before searching.
-        2. If already filtered to target and Selected:n > 0, do nothing.
-        3. Otherwise search target and use selected-count repair.
+        1. Clear old search.
+        2. Reset Selected count to zero.
+        3. Search for the target strategy.
+        4. Require one unique filtered row.
+        5. Select it.
+        6. Require Selected count to become exactly one.
         """
-        log(f"Selecting strategy through search + row/control checkbox click: {strategy_name!r}")
+        log(
+            "Selecting strategy with clean-state workflow: "
+            f"{strategy_name!r}"
+        )
 
-        search_box = self.selectors.find_search_combobox(main)
-        current_search_text = self.get_search_combobox_text(search_box)
+        self.clear_all_selected_strategies(
+            main
+        )
 
-        selected_initial_text = get_selected_count_text(main)
-        selected_initial = parse_selected_count(selected_initial_text)
+        search_box = (
+            self.selectors.find_search_combobox(main)
+        )
 
-        log(f"Current search box text: {current_search_text!r}")
-        log(f"Initial selected count: {selected_initial_text!r}")
+        self.actions.paste_text(
+            search_box,
+            strategy_name,
+            label="explorer search box",
+        )
 
-        # Case 1: search box already shows the target strategy.
-        if self.strategy_search_matches(current_search_text, strategy_name):
-            log("Search box already matches target strategy.")
+        log(
+            "Waiting for Explorer list to filter..."
+        )
 
-            self.wait_for_strategy_list_after_search(main)
+        self.wait_for_strategy_list_after_search(
+            main
+        )
 
-            if selected_initial is not None and selected_initial > 0:
-                log("Target strategy appears already selected. Proceeding without clicking.")
-                return
+        selected_before = get_selected_count(main)
 
-            if selected_initial == 0:
-                log("Target strategy appears unselected. Clicking once...")
-                self.click_strategy_checkbox(main, strategy_name)
-
-                selected_after_text = get_selected_count_text(main)
-                selected_after = parse_selected_count(selected_after_text)
-
-                log(f"Selected count after strategy click: {selected_after_text!r}")
-
-                if selected_after is not None and selected_after > 0:
-                    log("Strategy is now selected.")
-                    return
-
-                raise RuntimeError(
-                    f"Clicked target strategy but selected count did not increase. "
-                    f"Before={selected_initial_text!r}, After={selected_after_text!r}"
-                )
-
-        # Case 2: search box is different. Search first, then use repair logic.
-        self.actions.paste_text(search_box, strategy_name, label="explorer search box")
-
-        log("Waiting for explorer list to filter...")
-        self.wait_for_strategy_list_after_search(main)
-
-        selected_before_text = get_selected_count_text(main)
-        selected_before = parse_selected_count(selected_before_text)
-
-        log(f"Selected count before strategy click: {selected_before_text!r}")
-
-        if selected_before is None:
+        if selected_before != 0:
             raise RuntimeError(
-                "Could not read selected strategy count before clicking. "
-                "Refusing to do stateless toggle."
+                "Expected zero selected strategies before "
+                "selecting the filtered target. "
+                f"Actual selected count: {selected_before}"
             )
 
-        self.click_strategy_checkbox(main, strategy_name)
+        self.click_strategy_checkbox(
+            main,
+            strategy_name,
+        )
 
-        selected_after_text = get_selected_count_text(main)
-        selected_after = parse_selected_count(selected_after_text)
+        wait_until_stable(
+            lambda: get_selected_count(main) == 1,
+            timeout=1.5,
+            interval=0.03,
+            stable_reads=2,
+            error_msg=(
+                "Selected strategy count did not "
+                "stabilize at one"
+            ),
+        )
 
-        log(f"Selected count after strategy click: {selected_after_text!r}")
+        selected_after = get_selected_count(main)
 
-        if selected_after is None:
+        if selected_after != 1:
             raise RuntimeError(
-                "Could not read selected strategy count after clicking. "
-                "Cannot verify strategy state."
+                "Target Explorer selection could not be verified. "
+                f"Expected Selected: 1, actual={selected_after}"
             )
 
-        if selected_after > selected_before:
-            log("Strategy was unchecked before; now checked. Good.")
+        log(
+            f"Strategy selected successfully: "
+            f"{strategy_name!r}"
+        )
+
+    def clear_all_selected_strategies(
+        self,
+        main: BaseWrapper,
+    ) -> None:
+        """
+        Establish the invariant Selected: 0 before applying the
+        desired strategy search.
+
+        The first Select all click may select everything when the
+        checkbox is currently unchecked or indeterminate. A second
+        click then clears everything. Each step is verified using
+        the Selected:n state exposed by MetaStock.
+        """
+        search_box = (
+            self.selectors.find_search_combobox(main)
+        )
+
+        current_search = (
+            self.get_search_combobox_text(search_box)
+        )
+
+        # Clear an old filter first so Select all operates against
+        # the complete Explorer list.
+        if current_search:
+            log(
+                "Clearing previous Explorer search before "
+                "resetting strategy selection."
+            )
+
+            self.actions.paste_text(
+                search_box,
+                "",
+                label="clear explorer search box",
+            )
+
+            self.wait_for_strategy_list_after_search(
+                main
+            )
+
+        selected_count = get_selected_count(main)
+
+        if selected_count is None:
+            raise RuntimeError(
+                "Could not read Selected:n before clearing "
+                "strategy selections."
+            )
+
+        if selected_count == 0:
+            log(
+                "Strategy selected count is already zero."
+            )
             return
 
-        if selected_after < selected_before:
-            log(
-                "Strategy was already checked; first click unchecked it. "
-                "Clicking again to restore checked state..."
+        log(
+            "Resetting selected strategies. "
+            f"Current selected count: {selected_count}"
+        )
+
+        for attempt in range(1, 3):
+            checkbox = (
+                self.selectors
+                .find_strategy_select_all_checkbox(main)
             )
 
-            self.click_strategy_checkbox(main, strategy_name)
+            self.actions.invoke_or_click(
+                checkbox,
+                label=(
+                    "strategy Select all checkbox "
+                    f"(reset attempt {attempt})"
+                ),
+            )
 
-            selected_restore_text = get_selected_count_text(main)
-            selected_restore = parse_selected_count(selected_restore_text)
+            try:
+                wait_until_stable(
+                    lambda: get_selected_count(main) == 0,
+                    timeout=1.5,
+                    interval=0.03,
+                    stable_reads=2,
+                    error_msg=(
+                        "Selected strategy count did not "
+                        "stabilize at zero"
+                    ),
+                )
+            except RuntimeError:
+                pass
 
-            log(f"Selected count after restore click: {selected_restore_text!r}")
+            selected_after = get_selected_count(main)
 
-            if selected_restore == selected_before:
-                log("Strategy restored to checked state. Good.")
+            log(
+                "Selected count after Select all click "
+                f"{attempt}: {selected_after}"
+            )
+
+            if selected_after == 0:
+                log(
+                    "All previous strategy selections "
+                    "have been cleared."
+                )
                 return
 
-            raise RuntimeError(
-                "Tried to restore already-checked strategy, but selected count did not return "
-                f"to original value. Before={selected_before}, after_restore={selected_restore}"
+            if selected_after is None:
+                raise RuntimeError(
+                    "Could not read Selected:n after clicking "
+                    "the Select all checkbox."
+                )
+
+            log(
+                "The first click did not clear the selection. "
+                "It may have selected every strategy; clicking "
+                "again to reach zero."
             )
 
         raise RuntimeError(
-            "Strategy click did not change selected count. "
-            "Either the click missed, the list did not filter correctly, or UI did not refresh."
+            "Could not reset selected strategies to zero "
+            "after two Select all clicks."
         )

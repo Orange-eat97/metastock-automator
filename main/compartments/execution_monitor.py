@@ -145,6 +145,141 @@ class ExecutionMonitor:
                 result.append(v)
 
         return result
+    
+    def find_exit_button(
+        self,
+        exec_win: BaseWrapper,
+    ) -> Optional[BaseWrapper]:
+        """
+        Find the Exit button in the Exploration Execution window.
+        """
+        try:
+            buttons = exec_win.descendants(
+                control_type="Button"
+            )
+        except Exception:
+            buttons = []
+
+        for button in buttons:
+            try:
+                name = normalize_text(
+                    button.element_info.name or ""
+                )
+                text = normalize_text(
+                    button.window_text() or ""
+                )
+
+                if (
+                    name.casefold() == "exit"
+                    or text.casefold() == "exit"
+                ):
+                    return button
+
+            except Exception:
+                continue
+
+        return None
+
+
+    def close_results_window(
+        self,
+        main: BaseWrapper,
+        exec_win: BaseWrapper,
+        timeout: float = 2.0,
+        poll_interval: float = 0.03,
+    ) -> bool:
+        """
+        Click Exit after result scraping has completed.
+
+        Returns True when the Exploration Execution window closes.
+        Returns False when cleanup fails, without discarding already
+        scraped result data.
+        """
+        log(
+            "Closing Exploration Execution results window..."
+        )
+
+        # Refresh the wrapper because result scraping may have caused
+        # WPF controls to be recreated.
+        current_exec_win = (
+            self.find_execution_window_inside_main(main)
+            or exec_win
+        )
+
+        exit_button = self.find_exit_button(
+            current_exec_win
+        )
+
+        if exit_button is None:
+            log(
+                "Warning: could not find the Exit button "
+                "after result scraping."
+            )
+            return False
+
+        try:
+            if not exit_button.is_enabled():
+                log(
+                    "Warning: Exploration Execution Exit "
+                    "button is disabled."
+                )
+                return False
+        except Exception:
+            pass
+
+        try:
+            log("Invoking Exploration Execution Exit button.")
+            exit_button.invoke()
+
+        except Exception:
+            try:
+                log(
+                    "Invoke failed; clicking Exploration "
+                    "Execution Exit button."
+                )
+                exit_button.click_input()
+
+            except Exception as exc:
+                log(
+                    "Warning: could not activate the "
+                    f"Exit button: {exc}"
+                )
+                return False
+
+        deadline = time.monotonic() + timeout
+
+        while time.monotonic() < deadline:
+            remaining_window = (
+                self.find_execution_window_inside_main(
+                    main
+                )
+            )
+
+            if remaining_window is None:
+                log(
+                    "Exploration Execution results "
+                    "window closed."
+                )
+                return True
+
+            try:
+                if not remaining_window.is_visible():
+                    log(
+                        "Exploration Execution results "
+                        "window is no longer visible."
+                    )
+                    return True
+            except Exception:
+                pass
+
+            time.sleep(poll_interval)
+
+        log(
+            "Warning: Exit was activated, but the "
+            "Exploration Execution window remained open."
+        )
+
+        return False
 
     def execution_progress_done(self, exec_win: BaseWrapper) -> bool:
         """
