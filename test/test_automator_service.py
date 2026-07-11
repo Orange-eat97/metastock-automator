@@ -1,58 +1,71 @@
 from __future__ import annotations
 
-from phase2RequestReceiver import AddExplorerRequest
 from automator_service import (
-    AutomatorExecutionColumn,
     AutomatorExecutionRequest,
+    AutomatorResultReadRequest,
     MetaStockAutomatorService,
 )
 
 
-def test_service_maps_request_and_calls_existing_workflow() -> None:
-    captured: list[AddExplorerRequest] = []
+class FakeCaptureResult:
+    def __init__(self, payload):
+        self.payload = payload
 
-    def fake_runner(request: AddExplorerRequest) -> None:
-        captured.append(request)
+    def to_agent_contract_dict(self):
+        return self.payload
 
-    service = MetaStockAutomatorService(runner=fake_runner)
-    result = service.run_explorer(
-        AutomatorExecutionRequest(
-            explorer_id="explorer-1",
-            name="RSI Test",
-            description="RSI below 30.",
-            filter_code="RSI(14) < 30",
-            columns=[
-                AutomatorExecutionColumn(
-                    col_letter="A",
-                    col_code="RSI(14)",
-                )
-            ],
-            select_all_instruments=True,
-            max_execution_wait_sec=120,
+
+def verified_payload():
+    return {
+        "schema_version": "1.0",
+        "outcome": "matches_found",
+        "expected_count": 1,
+        "matched_count": 1,
+        "has_matches": True,
+        "clipboard_verification": {
+            "passed": True,
+            "expected_count": 1,
+            "scraped_count": 1,
+            "clipboard_count": 1,
+            "missing_from_scrape": [],
+            "unexpected_in_scrape": [],
+            "clipboard_headers": [],
+        },
+        "rows": [
+            {
+                "row_index": 0,
+                "instrument_name": (
+                    "A SONIC AEROSPACE ORD"
+                ),
+                "symbol": "D_ASON.SI",
+                "column_values": {
+                    "A": "0.5500",
+                    "B": "0.5300",
+                },
+            }
+        ],
+    }
+
+
+def test_one_service_runs_and_reads_results() -> None:
+    run_calls = []
+    read_calls = []
+
+    def fake_runner(request):
+        run_calls.append(request)
+
+    def fake_reader(*, close_after_read):
+        read_calls.append(close_after_read)
+        return FakeCaptureResult(
+            verified_payload()
         )
+
+    service = MetaStockAutomatorService(
+        runner=fake_runner,
+        result_reader=fake_reader,
     )
 
-    assert result.succeeded is True
-    assert len(captured) == 1
-    mapped = captured[0]
-    assert mapped.name == "RSI Test"
-    assert mapped.strategy_name == "RSI Test"
-    assert mapped.notes == "RSI below 30."
-    assert mapped.code_body == "RSI(14) < 30"
-    assert mapped.select_all_instruments is True
-    assert mapped.instrument_names is None
-    assert mapped.max_execution_wait_sec == 120
-    assert mapped.run_after_add is True
-    assert mapped.columns[0].slot == "A"
-    assert mapped.columns[0].code_body == "RSI(14)"
-
-
-def test_service_returns_failed_result_when_workflow_raises() -> None:
-    def failing_runner(request: AddExplorerRequest) -> None:
-        raise RuntimeError("MetaStock is not open")
-
-    service = MetaStockAutomatorService(runner=failing_runner)
-    result = service.run_explorer(
+    run_result = service.run_explorer(
         AutomatorExecutionRequest(
             explorer_id="explorer-1",
             name="RSI Test",
@@ -61,6 +74,54 @@ def test_service_returns_failed_result_when_workflow_raises() -> None:
         )
     )
 
+    assert run_result.succeeded is True
+    assert (
+        run_result.result_available
+        is True
+    )
+    assert len(run_calls) == 1
+
+    read_result = service.read_results(
+        AutomatorResultReadRequest(
+            explorer_id="explorer-1",
+            close_after_read=True,
+        )
+    )
+
+    assert read_result.succeeded is True
+    assert read_result.results is not None
+    assert (
+        read_result.results.matched_count
+        == 1
+    )
+    assert (
+        read_result.results.rows[0].symbol
+        == "D_ASON.SI"
+    )
+    assert read_calls == [True]
+
+
+def test_bad_verification_returns_failure() -> None:
+    payload = verified_payload()
+    payload[
+        "clipboard_verification"
+    ]["passed"] = False
+
+    def fake_reader(*, close_after_read):
+        return FakeCaptureResult(payload)
+
+    service = MetaStockAutomatorService(
+        runner=lambda request: None,
+        result_reader=fake_reader,
+    )
+
+    result = service.read_results(
+        AutomatorResultReadRequest()
+    )
+
     assert result.succeeded is False
-    assert "MetaStock is not open" in result.message
-    assert result.diagnostics["error_type"] == "RuntimeError"
+    assert result.results is None
+    assert (
+        result.diagnostics["error_type"]
+        == "ValueError"
+    )
