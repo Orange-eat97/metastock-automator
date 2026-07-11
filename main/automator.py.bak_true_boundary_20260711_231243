@@ -157,21 +157,10 @@ def run_request(request: ExploreRequest):
 
 def run_add_request(request: AddExplorerRequest) -> None:
     """
-    Legacy name for create-only behavior.
+    Phase 2 runner:
+        connect -> open Explore Console -> create explorer
 
-    Boundary:
-        create Explorer only.
-        no selection.
-        no execution.
-    """
-    create_explorer_request(request)
-
-
-def create_explorer_request(request: AddExplorerRequest) -> None:
-    """
-    Create an Explorer in MetaStock.
-
-    This function intentionally does not select or run the Explorer.
+    Does not run exploration.
     """
     actions, selectors, app, console = build_shared_components()
 
@@ -185,66 +174,32 @@ def create_explorer_request(request: AddExplorerRequest) -> None:
     creator.create(main_window, request)
 
 
-def select_explorer_request(request: AddExplorerRequest):
+def run_add_and_wait_request(
+    request: AddExplorerRequest,
+):
     """
-    Select an existing Explorer and instruments.
+    Phase 2 split runner for the agent:
 
-    This function intentionally does not create or run the Explorer.
+    1. create the Explorer in MetaStock;
+    2. run the Explorer;
+    3. wait until the Exploration Execution window has completed;
+    4. leave the result window open for read_current_results().
+
+    This function intentionally does not scrape, verify, or close the
+    result window. That second step belongs to read_current_results().
     """
-    workflow = build_workflow(
-        max_execution_wait_sec=request.max_execution_wait_sec,
-    )
-    return workflow.select_existing_explorer(request)
-
-
-def run_selected_explorer_request(request: AddExplorerRequest):
-    """
-    Run the currently selected Explorer.
-
-    This function intentionally does not create or select an Explorer.
-    It clicks Start, waits for completion, and leaves the result window open.
-    """
-    workflow = build_workflow(
-        max_execution_wait_sec=request.max_execution_wait_sec,
-    )
-    return workflow.run_selected_until_results_ready(request)
-
-
-def run_existing_explorer_and_wait_request(request: AddExplorerRequest):
-    """
-    Legacy convenience wrapper: select existing Explorer, then run selected.
-
-    Agent-facing service methods should call select_explorer_request() and
-    run_selected_explorer_request() separately instead of using this wrapper.
-    """
-    select_explorer_request(request)
-    return run_selected_explorer_request(request)
-
-
-def run_add_and_wait_request(request: AddExplorerRequest):
-    """
-    Legacy convenience wrapper: create, select, then run.
-
-    Agent-facing service methods should call create_explorer_request(),
-    select_explorer_request(), and run_selected_explorer_request() separately
-    instead of using this wrapper.
-    """
-    create_explorer_request(request)
-    select_explorer_request(request)
-    return run_selected_explorer_request(request)
-
-
-def run_add_and_run_request(request: AddExplorerRequest):
-    """
-    Backward-compatible combined CLI/GUI behavior:
-    create -> select -> run -> capture -> verify -> close.
-    """
-    create_explorer_request(request)
+    run_add_request(request)
 
     workflow = build_workflow(
-        max_execution_wait_sec=request.max_execution_wait_sec,
+        max_execution_wait_sec=(
+            request.max_execution_wait_sec
+        ),
     )
-    return workflow.run(request)
+
+    return workflow.run_until_results_ready(
+        request
+    )
+
 
 def read_current_results(
     *,
@@ -253,14 +208,13 @@ def read_current_results(
     """
     Read the currently open completed Exploration Execution window.
 
-    Boundary:
-        read results only.
-        no create.
-        no select.
-        no run.
+    Used by the agent-side read_metastock_explorer_results tool after
+    run_add_and_wait_request() has completed.
     """
     workflow = build_workflow(
-        max_execution_wait_sec=MAX_EXECUTION_WAIT_SEC,
+        max_execution_wait_sec=(
+            MAX_EXECUTION_WAIT_SEC
+        ),
     )
 
     main = workflow.app.connect()
@@ -313,6 +267,27 @@ def read_current_results(
         )
 
     return result
+
+
+def run_add_and_run_request(
+    request: AddExplorerRequest,
+):
+    """
+    Backward-compatible combined runner.
+
+    This preserves the older CLI/GUI behavior:
+    create -> run -> capture -> verify -> close -> return result.
+    """
+    run_add_request(request)
+
+    workflow = build_workflow(
+        max_execution_wait_sec=(
+            request.max_execution_wait_sec
+        ),
+    )
+
+    return workflow.run(request)
+
 
 # ============================================================
 # CLI MODE ROUTER
