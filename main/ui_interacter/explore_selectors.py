@@ -295,67 +295,156 @@ class ExploreSelectors:
 
         return None
 
-    def find_instruments_tree_item(self, main: BaseWrapper) -> BaseWrapper:
+    def find_instruments_tree_item(
+        self,
+        main: BaseWrapper,
+    ) -> BaseWrapper:
+        """
+        Find the Instruments TreeViewItem.
+
+        Prefer a narrow UIA lookup. Fall back to scanning only
+        TreeItem controls rather than the entire MetaStock tree.
+        """
         log("Searching for Instruments tree item...")
 
+        # Fast path using the UIA name observed in Inspect.exe.
+        try:
+            spec = main.child_window(
+                title_re=r".*InstrumentListTypesTVM.*",
+                control_type="TreeItem",
+            )
+
+            if spec.exists(timeout=0.15):
+                item = spec.wrapper_object()
+                log(
+                    "Found Instruments tree item through "
+                    "direct UIA lookup."
+                )
+                return item
+
+        except Exception:
+            pass
+
+        # Narrow fallback: inspect TreeItems only.
         candidates = []
 
-        for item in safe_descendants(main):
+        for item in safe_descendants(
+            main,
+            control_type="TreeItem",
+        ):
             try:
                 info = item.element_info
-                name = normalize_text(info.name or "")
-                class_name = normalize_text(info.class_name or "")
-                control_type = normalize_text(info.control_type or "")
-                r = item.rectangle()
 
-                combined = f"{name} {class_name} {control_type}"
+                name = normalize_text(
+                    info.name or ""
+                )
+                class_name = normalize_text(
+                    info.class_name or ""
+                )
+                control_type = normalize_text(
+                    info.control_type or ""
+                )
+                rectangle = item.rectangle()
+
+                combined = (
+                    f"{name} {class_name} {control_type}"
+                )
 
                 if "InstrumentListTypesTVM" not in combined:
                     continue
 
-                if r.width() <= 50 or r.height() <= 10:
+                if (
+                    rectangle.width() <= 50
+                    or rectangle.height() <= 10
+                ):
                     continue
 
-                if r.left > 350:
+                if rectangle.left > 350:
                     continue
 
                 child_texts = []
-                try:
-                    for child in item.children():
-                        txt = normalize_text(child.window_text())
-                        if txt:
-                            child_texts.append(txt)
 
-                        child_name = normalize_text(child.element_info.name or "")
-                        if child_name:
-                            child_texts.append(child_name)
+                try:
+                    children = item.children()
                 except Exception:
-                    pass
+                    children = []
+
+                for child in children:
+                    try:
+                        text = normalize_text(
+                            child.window_text()
+                        )
+
+                        if text:
+                            child_texts.append(text)
+                    except Exception:
+                        pass
+
+                    try:
+                        child_name = normalize_text(
+                            child.element_info.name or ""
+                        )
+
+                        if child_name:
+                            child_texts.append(
+                                child_name
+                            )
+                    except Exception:
+                        pass
 
                 score = 0
 
                 if "InstrumentListTypesTVM" in name:
                     score += 10
+
                 if class_name == "TreeViewItem":
                     score += 5
-                if "TreeItem" in control_type:
+
+                if control_type == "TreeItem":
                     score += 5
-                if any(t.lower() == "instruments" for t in child_texts):
+
+                if any(
+                    text.casefold() == "instruments"
+                    for text in child_texts
+                ):
                     score += 5
-                if any(parse_selected_total_text(t) is not None for t in child_texts):
+
+                if any(
+                    parse_selected_total_text(text)
+                    is not None
+                    for text in child_texts
+                ):
                     score += 5
 
                 candidates.append(
-                    (score, r.top, r.left, item, child_texts, r, name, class_name, control_type)
+                    (
+                        score,
+                        rectangle.top,
+                        rectangle.left,
+                        item,
+                    )
                 )
 
             except Exception:
                 continue
 
         if not candidates:
-            raise RuntimeError("Could not find Instruments TreeViewItem.")
+            raise RuntimeError(
+                "Could not find Instruments TreeViewItem."
+            )
 
-        candidates.sort(key=lambda x: (-x[0], x[1], x[2]))
+        candidates.sort(
+            key=lambda value: (
+                -value[0],
+                value[1],
+                value[2],
+            )
+        )
+
+        log(
+            "Found Instruments tree item through "
+            "TreeItem-only fallback."
+        )
 
         return candidates[0][3]
 

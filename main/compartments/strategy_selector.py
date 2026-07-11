@@ -168,11 +168,26 @@ class StrategySelector:
         )
 
         log(
-            "Waiting for Explorer list to filter..."
+            "Waiting for one filtered Explorer row..."
         )
 
-        self.wait_for_strategy_list_after_search(
-            main
+        def unique_filtered_row_ready():
+            try:
+                return (
+                    self.selectors
+                    .find_unique_filtered_strategy_row(main)
+                )
+            except Exception:
+                return None
+
+        wait_until(
+            unique_filtered_row_ready,
+            timeout=self.search_filter_timeout,
+            interval=0.03,
+            error_msg=(
+                "A unique Explorer row did not appear "
+                "after searching"
+            ),
         )
 
         selected_before = get_selected_count(main)
@@ -218,13 +233,11 @@ class StrategySelector:
         main: BaseWrapper,
     ) -> None:
         """
-        Establish the invariant Selected: 0 before applying the
-        desired strategy search.
+        Establish Selected: 0 before searching.
 
-        The first Select all click may select everything when the
-        checkbox is currently unchecked or indeterminate. A second
-        click then clears everything. Each step is verified using
-        the Selected:n state exposed by MetaStock.
+        Uses TogglePattern directly and waits only for the selected
+        count to change. This avoids spending 1.5 seconds waiting
+        for zero when the first toggle has selected every Explorer.
         """
         search_box = (
             self.selectors.find_search_combobox(main)
@@ -234,8 +247,6 @@ class StrategySelector:
             self.get_search_combobox_text(search_box)
         )
 
-        # Clear an old filter first so Select all operates against
-        # the complete Explorer list.
         if current_search:
             log(
                 "Clearing previous Explorer search before "
@@ -272,37 +283,64 @@ class StrategySelector:
         )
 
         for attempt in range(1, 3):
+            selected_before = get_selected_count(main)
+
+            if selected_before is None:
+                raise RuntimeError(
+                    "Could not read Selected:n before "
+                    "toggling Select all."
+                )
+
             checkbox = (
                 self.selectors
                 .find_strategy_select_all_checkbox(main)
             )
 
-            self.actions.invoke_or_click(
-                checkbox,
-                label=(
-                    "strategy Select all checkbox "
-                    f"(reset attempt {attempt})"
-                ),
+            log(
+                "Toggling strategy Select all checkbox "
+                f"(attempt {attempt})."
             )
 
             try:
-                wait_until_stable(
-                    lambda: get_selected_count(main) == 0,
-                    timeout=1.5,
+                # Inspect.exe confirmed TogglePattern is available.
+                checkbox.toggle()
+
+            except Exception:
+                # Keep physical click only as a fallback.
+                self.actions.click_control(
+                    checkbox,
+                    label=(
+                        "strategy Select all checkbox "
+                        f"(attempt {attempt})"
+                    ),
+                )
+
+            # Wait only until the selected count changes.
+            # Do not wait specifically for zero on the first click,
+            # because the first click may select every Explorer.
+            try:
+                wait_until(
+                    lambda: (
+                        get_selected_count(main) is not None
+                        and get_selected_count(main)
+                        != selected_before
+                    ),
+                    timeout=0.75,
                     interval=0.03,
-                    stable_reads=2,
                     error_msg=(
-                        "Selected strategy count did not "
-                        "stabilize at zero"
+                        "Selected count did not change after "
+                        "toggling Select all"
                     ),
                 )
             except RuntimeError:
+                # Inspect the final state below. A delayed or
+                # unchanged UIA read should not immediately fail.
                 pass
 
             selected_after = get_selected_count(main)
 
             log(
-                "Selected count after Select all click "
+                "Selected count after Select all toggle "
                 f"{attempt}: {selected_after}"
             )
 
@@ -315,17 +353,12 @@ class StrategySelector:
 
             if selected_after is None:
                 raise RuntimeError(
-                    "Could not read Selected:n after clicking "
-                    "the Select all checkbox."
+                    "Could not read Selected:n after "
+                    "toggling Select all."
                 )
-
-            log(
-                "The first click did not clear the selection. "
-                "It may have selected every strategy; clicking "
-                "again to reach zero."
-            )
 
         raise RuntimeError(
             "Could not reset selected strategies to zero "
-            "after two Select all clicks."
+            "after two Select all toggles."
         )
+    
