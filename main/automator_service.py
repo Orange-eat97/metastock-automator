@@ -7,8 +7,22 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from automator import run_add_and_run_request
-from phase2RequestReceiver import AddExplorerRequest, ExplorerColumn
+from automator import (
+    read_current_results,
+    run_add_and_wait_request,
+)
+from phase2RequestReceiver import (
+    AddExplorerRequest,
+    ExplorerColumn,
+)
+
+
+RESULT_SCHEMA_VERSION = "1.0"
+
+
+# ============================================================
+# EXECUTION CONTRACT
+# ============================================================
 
 
 @dataclass(frozen=True)
@@ -23,7 +37,9 @@ class AutomatorExecutionRequest:
     name: str
     description: str
     filter_code: str
-    columns: list[AutomatorExecutionColumn] = field(default_factory=list)
+    columns: list[AutomatorExecutionColumn] = field(
+        default_factory=list
+    )
     instruments: list[str] | None = None
     select_all_instruments: bool = True
     max_execution_wait_sec: int = 300
@@ -35,145 +51,612 @@ class AutomatorExecutionResult:
     message: str
     started_at: str
     finished_at: str
-    diagnostics: dict[str, Any] = field(default_factory=dict)
+    result_available: bool = False
+    diagnostics: dict[str, Any] = field(
+        default_factory=dict
+    )
+
+
+# ============================================================
+# RESULT-READING CONTRACT
+# ============================================================
+
+
+@dataclass(frozen=True)
+class AutomatorClipboardVerification:
+    passed: bool
+    expected_count: int
+    scraped_count: int
+    clipboard_count: int
+    missing_from_scrape: list[str] = field(
+        default_factory=list
+    )
+    unexpected_in_scrape: list[str] = field(
+        default_factory=list
+    )
+    clipboard_headers: list[str] = field(
+        default_factory=list
+    )
+
+    @classmethod
+    def from_dict(
+        cls,
+        payload: dict[str, Any],
+    ) -> AutomatorClipboardVerification:
+        return cls(
+            passed=bool(payload.get("passed", False)),
+            expected_count=int(
+                payload.get("expected_count", 0)
+            ),
+            scraped_count=int(
+                payload.get("scraped_count", 0)
+            ),
+            clipboard_count=int(
+                payload.get("clipboard_count", 0)
+            ),
+            missing_from_scrape=[
+                str(value)
+                for value in (
+                    payload.get(
+                        "missing_from_scrape"
+                    )
+                    or []
+                )
+            ],
+            unexpected_in_scrape=[
+                str(value)
+                for value in (
+                    payload.get(
+                        "unexpected_in_scrape"
+                    )
+                    or []
+                )
+            ],
+            clipboard_headers=[
+                str(value)
+                for value in (
+                    payload.get("clipboard_headers")
+                    or []
+                )
+            ],
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "passed": self.passed,
+            "expected_count": self.expected_count,
+            "scraped_count": self.scraped_count,
+            "clipboard_count": self.clipboard_count,
+            "missing_from_scrape": list(
+                self.missing_from_scrape
+            ),
+            "unexpected_in_scrape": list(
+                self.unexpected_in_scrape
+            ),
+            "clipboard_headers": list(
+                self.clipboard_headers
+            ),
+        }
+
+
+@dataclass(frozen=True)
+class AutomatorResultRow:
+    row_index: int
+    instrument_name: str
+    symbol: str | None
+    column_values: dict[str, str] = field(
+        default_factory=dict
+    )
+
+    @classmethod
+    def from_dict(
+        cls,
+        payload: dict[str, Any],
+    ) -> AutomatorResultRow:
+        return cls(
+            row_index=int(
+                payload.get("row_index", 0)
+            ),
+            instrument_name=str(
+                payload.get("instrument_name")
+                or ""
+            ),
+            symbol=(
+                str(payload["symbol"])
+                if payload.get("symbol")
+                is not None
+                else None
+            ),
+            column_values={
+                str(letter): str(value)
+                for letter, value in (
+                    payload.get("column_values")
+                    or {}
+                ).items()
+            },
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "row_index": self.row_index,
+            "instrument_name": self.instrument_name,
+            "symbol": self.symbol,
+            "column_values": dict(
+                self.column_values
+            ),
+        }
+
+
+@dataclass(frozen=True)
+class AutomatorExplorerResults:
+    schema_version: str
+    outcome: str
+    expected_count: int
+    matched_count: int
+    has_matches: bool
+    clipboard_verification: (
+        AutomatorClipboardVerification | None
+    ) = None
+    rows: list[AutomatorResultRow] = field(
+        default_factory=list
+    )
+
+    @classmethod
+    def from_dict(
+        cls,
+        payload: dict[str, Any],
+    ) -> AutomatorExplorerResults:
+        schema_version = str(
+            payload.get("schema_version") or ""
+        )
+
+        if schema_version != RESULT_SCHEMA_VERSION:
+            raise ValueError(
+                "Unsupported MetaStock result schema "
+                f"version: {schema_version!r}. "
+                f"Expected {RESULT_SCHEMA_VERSION!r}."
+            )
+
+        outcome = str(
+            payload.get("outcome") or ""
+        )
+
+        if outcome not in {
+            "matches_found",
+            "no_matches",
+        }:
+            raise ValueError(
+                "Unsupported MetaStock result outcome: "
+                f"{outcome!r}."
+            )
+
+        rows = [
+            AutomatorResultRow.from_dict(item)
+            for item in (
+                payload.get("rows") or []
+            )
+            if isinstance(item, dict)
+        ]
+
+        raw_verification = payload.get(
+            "clipboard_verification"
+        )
+        verification = (
+            AutomatorClipboardVerification
+            .from_dict(raw_verification)
+            if isinstance(
+                raw_verification,
+                dict,
+            )
+            else None
+        )
+
+        result = cls(
+            schema_version=schema_version,
+            outcome=outcome,
+            expected_count=int(
+                payload.get(
+                    "expected_count",
+                    0,
+                )
+            ),
+            matched_count=int(
+                payload.get(
+                    "matched_count",
+                    len(rows),
+                )
+            ),
+            has_matches=bool(
+                payload.get(
+                    "has_matches",
+                    bool(rows),
+                )
+            ),
+            clipboard_verification=(
+                verification
+            ),
+            rows=rows,
+        )
+
+        result.validate()
+        return result
+
+    def validate(self) -> None:
+        if self.matched_count != len(self.rows):
+            raise ValueError(
+                "MetaStock matched_count does not "
+                "equal the number of result rows: "
+                f"{self.matched_count} != "
+                f"{len(self.rows)}."
+            )
+
+        if self.outcome == "no_matches":
+            if (
+                self.expected_count != 0
+                or self.matched_count != 0
+                or self.rows
+            ):
+                raise ValueError(
+                    "A no_matches result must have "
+                    "zero expected and matched rows."
+                )
+
+            return
+
+        if (
+            self.expected_count
+            != self.matched_count
+        ):
+            raise ValueError(
+                "MetaStock result row count mismatch: "
+                f"expected={self.expected_count}, "
+                f"matched={self.matched_count}."
+            )
+
+        if (
+            self.clipboard_verification is None
+            or (
+                self.clipboard_verification
+                .passed
+                is not True
+            )
+        ):
+            raise ValueError(
+                "A matches_found result must include "
+                "a passed clipboard verification."
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "outcome": self.outcome,
+            "expected_count": (
+                self.expected_count
+            ),
+            "matched_count": (
+                self.matched_count
+            ),
+            "has_matches": self.has_matches,
+            "clipboard_verification": (
+                self.clipboard_verification
+                .to_dict()
+                if (
+                    self.clipboard_verification
+                    is not None
+                )
+                else None
+            ),
+            "rows": [
+                row.to_dict()
+                for row in self.rows
+            ],
+        }
+
+
+@dataclass(frozen=True)
+class AutomatorResultReadRequest:
+    explorer_id: str | None = None
+    close_after_read: bool = True
+
+
+@dataclass(frozen=True)
+class AutomatorResultReadResult:
+    succeeded: bool
+    message: str
+    started_at: str
+    finished_at: str
+    explorer_id: str | None = None
+    results: AutomatorExplorerResults | None = None
+    diagnostics: dict[str, Any] = field(
+        default_factory=dict
+    )
+
+
+# ============================================================
+# SINGLE PUBLIC AUTOMATOR SERVICE
+# ============================================================
 
 
 class MetaStockAutomatorService:
-    """Stable workflow-level boundary around the existing Automator flow."""
+    """
+    Stable workflow-level boundary for MetaStock automation.
+
+    Public capabilities:
+
+    - run_explorer():
+      create and execute an Explorer, leaving the completed
+      Exploration Execution window ready to be read;
+
+    - read_results():
+      scrape, normalize, clipboard-verify, and optionally close
+      the currently open result window.
+
+    UIA wrappers, selectors, and clipboard implementation details
+    stay behind this service.
+    """
 
     def __init__(
         self,
-        runner: Callable[[AddExplorerRequest], Any] | None = None,
+        runner: (
+            Callable[[AddExplorerRequest], Any]
+            | None
+        ) = None,
+        result_reader: (
+            Callable[..., Any] | None
+        ) = None,
     ) -> None:
-        self._runner = runner or run_add_and_run_request
+        self._runner = (
+            runner
+            or run_add_and_wait_request
+        )
+        self._result_reader = (
+            result_reader
+            or read_current_results
+        )
 
     def run_explorer(
         self,
         request: AutomatorExecutionRequest,
     ) -> AutomatorExecutionResult:
-        normalized = self._normalize_request(request)
-        add_request = self._to_add_explorer_request(normalized)
+        normalized = (
+            self._normalize_execution_request(
+                request
+            )
+        )
+        add_request = (
+            self._to_add_explorer_request(
+                normalized
+            )
+        )
 
         started_at = self._utc_now()
         stdout_buffer = io.StringIO()
         stderr_buffer = io.StringIO()
 
         try:
-            with redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
-                workflow_result = self._runner(add_request)
-
-            diagnostics: dict[str, Any] = {
-                "explorer_id": normalized.explorer_id,
-                "explorer_name": normalized.name,
-                "stdout_text": stdout_buffer.getvalue(),
-                "stderr_text": stderr_buffer.getvalue(),
-            }
-
-            # Preserve compatibility with old runners and test doubles that
-            # return None instead of an ExplorationCaptureResult.
-            if workflow_result is None:
-                return AutomatorExecutionResult(
-                    succeeded=True,
-                    message=(
-                        f"Explorer {normalized.name!r} was created and run "
-                        "in MetaStock. No structured result was returned."
-                    ),
-                    started_at=started_at,
-                    finished_at=self._utc_now(),
-                    diagnostics=diagnostics,
-                )
-
-            if not hasattr(workflow_result, "to_dict"):
-                raise TypeError(
-                    "The MetaStock workflow returned an unsupported result type: "
-                    f"{type(workflow_result).__name__}. "
-                    "Expected an object with a to_dict() method."
-                )
-
-            exploration_result = ( workflow_result.to_agent_contract_dict() )
-            diagnostics["exploration_result"] = ( exploration_result )
-
-            outcome = exploration_result.get("outcome")
-            matched_count = exploration_result.get("matched_count", 0)
-
-            if outcome == "no_matches":
-                message = (
-                    f"Explorer {normalized.name!r} ran successfully "
-                    "and matched no instruments. No result rows were "
-                    "returned to the agent."
-                )
-
-            elif outcome == "matches_found":
-                clipboard_verification = (
-                    exploration_result.get("clipboard_verification") or {}
-                )
-
-                if clipboard_verification.get("passed") is not True:
-                    raise RuntimeError(
-                        "MetaStock returned results, but clipboard verification "
-                        "did not pass."
-                    )
-
-                message = (
-                    f"Explorer {normalized.name!r} was created and run in "
-                    f"MetaStock. Captured and verified {matched_count} "
-                    "matched instruments."
-                )
-
-            else:
-                raise RuntimeError(
-                    "The MetaStock workflow returned an unknown outcome: "
-                    f"{outcome!r}."
-                )
+            with (
+                redirect_stdout(stdout_buffer),
+                redirect_stderr(stderr_buffer),
+            ):
+                self._runner(add_request)
 
             return AutomatorExecutionResult(
                 succeeded=True,
-                message=message,
+                message=(
+                    f"Explorer {normalized.name!r} "
+                    "was created and run in MetaStock. "
+                    "Its completed results are ready "
+                    "to be read."
+                ),
                 started_at=started_at,
                 finished_at=self._utc_now(),
-                diagnostics=diagnostics,
+                result_available=True,
+                diagnostics={
+                    "explorer_id": (
+                        normalized.explorer_id
+                    ),
+                    "explorer_name": (
+                        normalized.name
+                    ),
+                    "result_available": True,
+                    "stdout_text": (
+                        stdout_buffer.getvalue()
+                    ),
+                    "stderr_text": (
+                        stderr_buffer.getvalue()
+                    ),
+                },
             )
 
         except Exception as exc:
             return AutomatorExecutionResult(
                 succeeded=False,
-                message=f"MetaStock execution failed: {exc}",
+                message=(
+                    "MetaStock execution failed: "
+                    f"{exc}"
+                ),
                 started_at=started_at,
                 finished_at=self._utc_now(),
+                result_available=False,
                 diagnostics={
-                    "explorer_id": normalized.explorer_id,
-                    "explorer_name": normalized.name,
-                    "error_type": type(exc).__name__,
+                    "explorer_id": (
+                        normalized.explorer_id
+                    ),
+                    "explorer_name": (
+                        normalized.name
+                    ),
+                    "result_available": False,
+                    "error_type": (
+                        type(exc).__name__
+                    ),
                     "error_message": str(exc),
-                    "traceback": traceback.format_exc(),
-                    "stdout_text": stdout_buffer.getvalue(),
-                    "stderr_text": stderr_buffer.getvalue(),
+                    "traceback": (
+                        traceback.format_exc()
+                    ),
+                    "stdout_text": (
+                        stdout_buffer.getvalue()
+                    ),
+                    "stderr_text": (
+                        stderr_buffer.getvalue()
+                    ),
                 },
             )
 
-    def _normalize_request(
+    def read_results(
+        self,
+        request: AutomatorResultReadRequest,
+    ) -> AutomatorResultReadResult:
+        started_at = self._utc_now()
+        stdout_buffer = io.StringIO()
+        stderr_buffer = io.StringIO()
+
+        try:
+            with (
+                redirect_stdout(stdout_buffer),
+                redirect_stderr(stderr_buffer),
+            ):
+                capture_result = (
+                    self._result_reader(
+                        close_after_read=(
+                            request.close_after_read
+                        ),
+                    )
+                )
+
+            if not hasattr(
+                capture_result,
+                "to_agent_contract_dict",
+            ):
+                raise TypeError(
+                    "The MetaStock result reader "
+                    "returned an unsupported object: "
+                    f"{type(capture_result).__name__}."
+                )
+
+            payload = (
+                capture_result
+                .to_agent_contract_dict()
+            )
+            results = (
+                AutomatorExplorerResults
+                .from_dict(payload)
+            )
+
+            if (
+                results.outcome
+                == "no_matches"
+            ):
+                message = (
+                    "MetaStock results were read "
+                    "successfully. The Explorer "
+                    "matched no instruments."
+                )
+            else:
+                message = (
+                    "MetaStock results were read "
+                    "and verified successfully: "
+                    f"{results.matched_count} "
+                    "matched instruments."
+                )
+
+            return AutomatorResultReadResult(
+                succeeded=True,
+                message=message,
+                started_at=started_at,
+                finished_at=self._utc_now(),
+                explorer_id=request.explorer_id,
+                results=results,
+                diagnostics={
+                    "close_after_read": (
+                        request.close_after_read
+                    ),
+                    "stdout_text": (
+                        stdout_buffer.getvalue()
+                    ),
+                    "stderr_text": (
+                        stderr_buffer.getvalue()
+                    ),
+                },
+            )
+
+        except Exception as exc:
+            return AutomatorResultReadResult(
+                succeeded=False,
+                message=(
+                    "MetaStock result reading "
+                    f"failed: {exc}"
+                ),
+                started_at=started_at,
+                finished_at=self._utc_now(),
+                explorer_id=request.explorer_id,
+                results=None,
+                diagnostics={
+                    "close_after_read": (
+                        request.close_after_read
+                    ),
+                    "error_type": (
+                        type(exc).__name__
+                    ),
+                    "error_message": str(exc),
+                    "traceback": (
+                        traceback.format_exc()
+                    ),
+                    "stdout_text": (
+                        stdout_buffer.getvalue()
+                    ),
+                    "stderr_text": (
+                        stderr_buffer.getvalue()
+                    ),
+                },
+            )
+
+    def _normalize_execution_request(
         self,
         request: AutomatorExecutionRequest,
     ) -> AutomatorExecutionRequest:
-        explorer_id = self._required_text(request.explorer_id, "explorer_id")
-        name = self._required_text(request.name, "name")
-        filter_code = self._required_text(request.filter_code, "filter_code")
-        description = str(request.description or "")
+        explorer_id = self._required_text(
+            request.explorer_id,
+            "explorer_id",
+        )
+        name = self._required_text(
+            request.name,
+            "name",
+        )
+        filter_code = self._required_text(
+            request.filter_code,
+            "filter_code",
+        )
+        description = str(
+            request.description or ""
+        )
 
         if request.max_execution_wait_sec <= 0:
-            raise ValueError("max_execution_wait_sec must be positive.")
+            raise ValueError(
+                "max_execution_wait_sec must "
+                "be positive."
+            )
 
-        columns: list[AutomatorExecutionColumn] = []
+        columns: list[
+            AutomatorExecutionColumn
+        ] = []
+
         for item in request.columns:
             letter = self._required_text(
                 item.col_letter,
                 "columns[].col_letter",
             ).upper()
-            code = self._required_text(item.col_code, "columns[].col_code")
+            code = self._required_text(
+                item.col_code,
+                "columns[].col_code",
+            )
 
-            if len(letter) != 1 or not letter.isalpha():
+            if (
+                len(letter) != 1
+                or not letter.isalpha()
+            ):
                 raise ValueError(
-                    "Each column letter must be one alphabetic character."
+                    "Each column letter must be "
+                    "one alphabetic character."
                 )
 
             columns.append(
@@ -183,14 +666,29 @@ class MetaStockAutomatorService:
                 )
             )
 
-        columns.sort(key=lambda column: column.col_letter)
-        expected = [chr(ord("A") + index) for index in range(len(columns))]
-        actual = [column.col_letter for column in columns]
+        columns.sort(
+            key=lambda column: (
+                column.col_letter
+            )
+        )
+
+        expected = [
+            chr(ord("A") + index)
+            for index in range(
+                len(columns)
+            )
+        ]
+        actual = [
+            column.col_letter
+            for column in columns
+        ]
 
         if actual != expected:
             raise ValueError(
-                "Column letters must start at A and be continuous. "
-                f"Expected {expected}, got {actual}."
+                "Column letters must start at A "
+                "and be continuous. "
+                f"Expected {expected}, "
+                f"got {actual}."
             )
 
         if request.select_all_instruments:
@@ -198,14 +696,22 @@ class MetaStockAutomatorService:
             select_all = True
         else:
             instruments = [
-                self._required_text(value, "instruments[]")
-                for value in (request.instruments or [])
+                self._required_text(
+                    value,
+                    "instruments[]",
+                )
+                for value in (
+                    request.instruments or []
+                )
             ]
+
             if not instruments:
                 raise ValueError(
-                    "At least one instrument is required when "
+                    "At least one instrument is "
+                    "required when "
                     "select_all_instruments is false."
                 )
+
             select_all = False
 
         return AutomatorExecutionRequest(
@@ -215,8 +721,12 @@ class MetaStockAutomatorService:
             filter_code=filter_code,
             columns=columns,
             instruments=instruments,
-            select_all_instruments=select_all,
-            max_execution_wait_sec=request.max_execution_wait_sec,
+            select_all_instruments=(
+                select_all
+            ),
+            max_execution_wait_sec=(
+                request.max_execution_wait_sec
+            ),
         )
 
     def _to_add_explorer_request(
@@ -235,19 +745,34 @@ class MetaStockAutomatorService:
                 for column in request.columns
             ],
             strategy_name=request.name,
-            instrument_names=request.instruments,
-            select_all_instruments=request.select_all_instruments,
-            max_execution_wait_sec=request.max_execution_wait_sec,
+            instrument_names=(
+                request.instruments
+            ),
+            select_all_instruments=(
+                request.select_all_instruments
+            ),
+            max_execution_wait_sec=(
+                request.max_execution_wait_sec
+            ),
             run_after_add=True,
         )
 
     @staticmethod
-    def _required_text(value: Any, field_name: str) -> str:
+    def _required_text(
+        value: Any,
+        field_name: str,
+    ) -> str:
         cleaned = str(value or "").strip()
+
         if not cleaned:
-            raise ValueError(f"{field_name} is required.")
+            raise ValueError(
+                f"{field_name} is required."
+            )
+
         return cleaned
 
     @staticmethod
     def _utc_now() -> str:
-        return datetime.now(timezone.utc).isoformat()
+        return datetime.now(
+            timezone.utc
+        ).isoformat()
