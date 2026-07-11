@@ -13,20 +13,21 @@ from compartments.result_capture import (
     ExplorationResultCapture,
 )
 
+from pywinauto.base_wrapper import BaseWrapper
+
 
 class ExploreWorkflow:
     """
     High-level MetaStock Explore workflow.
 
-    Story order:
-    1. connect
-    2. open Explore
-    3. select strategy
-    4. select instruments
-    5. start exploration
-    6. wait for execution
-    7. scrape result rows
-    8. verify scraped instruments against MetaStock Copy output
+    Two execution shapes are intentionally supported:
+
+    - run():
+      old combined CLI behavior: run, capture, verify, close, return result.
+
+    - run_until_results_ready():
+      agent split behavior: run and leave completed results window open.
+      A later read_current_results() call captures/verifies/persists.
     """
 
     def __init__(
@@ -45,10 +46,18 @@ class ExploreWorkflow:
         self.execution_monitor = execution_monitor
         self.result_capture = result_capture
 
-    def run(
+    def run_until_results_ready(
         self,
         request: ExploreRequest,
-    ) -> ExplorationCaptureResult:
+    ) -> BaseWrapper:
+        """
+        Run an Explorer and wait until the Exploration Execution window
+        is complete, but do not scrape or close it.
+
+        This is the split workflow required by the agent:
+        run_explorer_in_metastock first, read_metastock_explorer_results
+        second.
+        """
         main = self.app.connect()
 
         self.console.open(main)
@@ -69,7 +78,8 @@ class ExploreWorkflow:
         self.console.start(main)
 
         execution_window = (
-            self.execution_monitor.wait_for_window(main)
+            self.execution_monitor
+            .wait_for_window(main)
         )
 
         self.execution_monitor.wait_done(
@@ -89,12 +99,32 @@ class ExploreWorkflow:
         except Exception:
             pass
 
+        log(
+            "Exploration completed. Result window is ready "
+            "for separate result reading."
+        )
+
+        return execution_window
+
+    def run(
+        self,
+        request: ExploreRequest,
+    ) -> ExplorationCaptureResult:
+        execution_window = (
+            self.run_until_results_ready(
+                request
+            )
+        )
+
+        main = self.app.connect()
+
         result = self.result_capture.capture(
             execution_window
         )
 
         results_window_closed = (
-            self.execution_monitor.close_results_window(
+            self.execution_monitor
+            .close_results_window(
                 main=main,
                 exec_win=execution_window,
             )

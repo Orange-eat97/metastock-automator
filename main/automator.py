@@ -95,8 +95,6 @@ def build_shared_components():
 def build_workflow(max_execution_wait_sec: int) -> ExploreWorkflow:
     """
     Build and wire all Phase 1 components.
-
-    Preserved from the original automator.py.
     """
     actions, selectors, app, console = build_shared_components()
 
@@ -118,9 +116,9 @@ def build_workflow(max_execution_wait_sec: int) -> ExploreWorkflow:
     )
 
     result_scraper = ExplorationResultScraper(
-    page_load_delay=0.35,
-    max_stale_pages=4,
-)
+        page_load_delay=0.35,
+        max_stale_pages=4,
+    )
 
     clipboard_verifier = ClipboardResultVerifier(
         actions=actions,
@@ -176,9 +174,110 @@ def run_add_request(request: AddExplorerRequest) -> None:
     creator.create(main_window, request)
 
 
+def run_add_and_wait_request(
+    request: AddExplorerRequest,
+):
+    """
+    Phase 2 split runner for the agent:
+
+    1. create the Explorer in MetaStock;
+    2. run the Explorer;
+    3. wait until the Exploration Execution window has completed;
+    4. leave the result window open for read_current_results().
+
+    This function intentionally does not scrape, verify, or close the
+    result window. That second step belongs to read_current_results().
+    """
+    run_add_request(request)
+
+    workflow = build_workflow(
+        max_execution_wait_sec=(
+            request.max_execution_wait_sec
+        ),
+    )
+
+    return workflow.run_until_results_ready(
+        request
+    )
+
+
+def read_current_results(
+    *,
+    close_after_read: bool = True,
+):
+    """
+    Read the currently open completed Exploration Execution window.
+
+    Used by the agent-side read_metastock_explorer_results tool after
+    run_add_and_wait_request() has completed.
+    """
+    workflow = build_workflow(
+        max_execution_wait_sec=(
+            MAX_EXECUTION_WAIT_SEC
+        ),
+    )
+
+    main = workflow.app.connect()
+
+    execution_window = (
+        workflow.execution_monitor
+        .find_execution_window_inside_main(main)
+    )
+
+    if execution_window is None:
+        raise RuntimeError(
+            "No open Exploration Execution result window was found. "
+            "Run an Explorer first, wait until it completes, then read "
+            "the results."
+        )
+
+    try:
+        execution_window.set_focus()
+    except Exception:
+        pass
+
+    result = workflow.result_capture.capture(
+        execution_window
+    )
+
+    if close_after_read:
+        results_window_closed = (
+            workflow.execution_monitor
+            .close_results_window(
+                main=main,
+                exec_win=execution_window,
+            )
+        )
+
+        if not results_window_closed:
+            raise RuntimeError(
+                "The result was captured, but the Exploration Execution "
+                "window could not be closed. The open window may block "
+                "later MetaStock operations."
+            )
+
+    if result.outcome == "no_matches":
+        log(
+            "Exploration result read successfully with zero matches."
+        )
+    else:
+        log(
+            f"Read and verified {result.matched_count} "
+            "MetaStock result rows."
+        )
+
+    return result
+
+
 def run_add_and_run_request(
     request: AddExplorerRequest,
 ):
+    """
+    Backward-compatible combined runner.
+
+    This preserves the older CLI/GUI behavior:
+    create -> run -> capture -> verify -> close -> return result.
+    """
     run_add_request(request)
 
     workflow = build_workflow(
@@ -225,6 +324,7 @@ def pop_mode_from_argv() -> str:
     # if first arg is --strategy, --gui, etc., use old Phase 1 behavior.
     return "run"
 
+
 def print_result_inspection(result) -> None:
     if result is None:
         log(
@@ -243,6 +343,7 @@ def print_result_inspection(result) -> None:
 
     print("\n=== AGENT JSON CONTRACT ===")
     print(result.to_pretty_json())
+
 
 # ============================================================
 # MAIN
@@ -268,7 +369,7 @@ def main() -> None:
     if mode == "run":
         receiver = CliRequestReceiver()
         request = receiver.receive()
-        
+
         result = run_request(request)
         print_result_inspection(result)
         return
