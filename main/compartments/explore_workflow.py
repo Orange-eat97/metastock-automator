@@ -93,16 +93,25 @@ class ExploreWorkflow:
             execution_window
         )
 
-        self.execution_monitor.close_results_window(
-            main=main,
-            exec_win=execution_window,
+        results_window_closed = (
+            self.execution_monitor.close_results_window(
+                main=main,
+                exec_win=execution_window,
+            )
         )
 
+        if not results_window_closed:
+            raise RuntimeError(
+                "The exploration completed and its result was "
+                "captured, but the Exploration Execution window "
+                "could not be closed. The open window may block "
+                "later MetaStock operations."
+            )
 
         if result.outcome == "no_matches":
             log(
-                "Exploration completed successfully but returned "
-                "zero matches. Explorer revision is required."
+                "Exploration completed successfully with zero "
+                "matches. No result rows will be returned."
             )
         else:
             log(

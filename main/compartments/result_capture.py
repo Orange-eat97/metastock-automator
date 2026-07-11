@@ -112,13 +112,22 @@ class ExplorationCaptureResult:
 
     @property
     def requires_agent_action(self) -> bool:
-        return self.outcome == "no_matches"
+        """
+        A zero-match exploration is a valid completed execution.
+
+        The automator reports the outcome but does not instruct the
+        agent to revise, retry, or take another action.
+        """
+        return False
 
     @property
     def recommended_next_action(self) -> str | None:
-        if self.outcome == "no_matches":
-            return "revise_explorer"
+        """
+        The automator returns observed execution results only.
 
+        Deciding whether to revise an Explorer belongs to the agent
+        or calling application.
+        """
         return None
 
     def to_dict(self) -> dict[str, Any]:

@@ -98,8 +98,9 @@ class MetaStockAutomatorService:
 
             if outcome == "no_matches":
                 message = (
-                    f"Explorer {normalized.name!r} ran successfully but matched "
-                    "no instruments. The Explorer should be revised."
+                    f"Explorer {normalized.name!r} ran successfully "
+                    "and matched no instruments. No result rows were "
+                    "returned to the agent."
                 )
 
             elif outcome == "matches_found":
