@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from timeit import main
 from typing import Optional
 
 from pywinauto.base_wrapper import BaseWrapper
@@ -147,7 +148,10 @@ class InstrumentSelector:
                 log("Instruments is unchecked. Clicking once to select all...")
                 self.click_instruments_checkbox(before)
 
-                after = self.read_state(main)
+                after = self.wait_for_state_change(
+                    main,
+                    before,
+                )
                 log(f"Instruments checkbox toggle state after click: {after.toggle_state}")
                 log(f"Instruments selected count after click: {after.count}")
 
@@ -169,7 +173,10 @@ class InstrumentSelector:
 
                 self.click_instruments_checkbox(before)
 
-                after_first = self.read_state(main)
+                after_first = self.wait_for_state_change(
+                    main,
+                    before,
+                )
                 log(f"Instruments toggle state after first partial click: {after_first.toggle_state}")
                 log(f"Instruments selected count after first partial click: {after_first.count}")
 
@@ -185,7 +192,11 @@ class InstrumentSelector:
 
                     self.click_instruments_checkbox(after_first)
 
-                    after_second = self.read_state(main)
+                    after_second = self.wait_for_state_change(
+                        main,
+                        after_first,
+                    )
+
                     log(f"Instruments toggle state after second click: {after_second.toggle_state}")
                     log(f"Instruments selected count after second click: {after_second.count}")
 
@@ -347,26 +358,65 @@ class InstrumentSelector:
             pass
 
         return None
+    
+    def wait_for_state_change(
+        self,
+        main: BaseWrapper,
+        before: InstrumentState,
+        timeout: float = 0.8,
+        poll_interval: float = 0.03,
+    ) -> InstrumentState:
+        """
+        Wait until the Instruments toggle state or selected count changes.
+        """
+        deadline = time.monotonic() + timeout
+        latest = before
+
+        while time.monotonic() < deadline:
+            latest = self.read_state(main)
+
+            if (
+                latest.toggle_state != before.toggle_state
+                or latest.count != before.count
+            ):
+                return latest
+
+            time.sleep(poll_interval)
+
+        return latest
 
     # ============================================================
     # CLICKING
     # ============================================================
 
-    def click_instruments_checkbox(self, state: InstrumentState) -> None:
+    def click_instruments_checkbox(
+        self,
+        state: InstrumentState,
+    ) -> None:
         """
-        Prefer real checkbox click.
-        Fall back to row-relative coordinate click only if checkbox is not exposed.
+        Prefer TogglePattern and fall back to physical input.
         """
         if state.checkbox is not None:
             log(
-                "Clicking real Instruments checkbox. "
-                f"ToggleState before click: {state.toggle_state}"
+                "Toggling real Instruments checkbox. "
+                f"ToggleState before: {state.toggle_state}"
             )
-            self.actions.click_control(state.checkbox, "Instruments checkbox")
-            time.sleep(self.medium_delay)
-            return
 
-        log("Could not find real Instruments checkbox. Using row-relative fallback click.")
+            try:
+                state.checkbox.toggle()
+                return
+            except Exception:
+                self.actions.click_control(
+                    state.checkbox,
+                    "Instruments checkbox",
+                )
+                return
+
+        log(
+            "Could not find real Instruments checkbox. "
+            "Using row-relative fallback click."
+        )
+
         self.actions.click_checkbox_in_row(
             state.row,
             label="Instruments",
