@@ -43,7 +43,7 @@ class MetaStockAutomatorService:
 
     def __init__(
         self,
-        runner: Callable[[AddExplorerRequest], None] | None = None,
+        runner: Callable[[AddExplorerRequest], Any] | None = None,
     ) -> None:
         self._runner = runner or run_add_and_run_request
 
@@ -60,22 +60,79 @@ class MetaStockAutomatorService:
 
         try:
             with redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
-                self._runner(add_request)
+                workflow_result = self._runner(add_request)
+
+            diagnostics: dict[str, Any] = {
+                "explorer_id": normalized.explorer_id,
+                "explorer_name": normalized.name,
+                "stdout_text": stdout_buffer.getvalue(),
+                "stderr_text": stderr_buffer.getvalue(),
+            }
+
+            # Preserve compatibility with old runners and test doubles that
+            # return None instead of an ExplorationCaptureResult.
+            if workflow_result is None:
+                return AutomatorExecutionResult(
+                    succeeded=True,
+                    message=(
+                        f"Explorer {normalized.name!r} was created and run "
+                        "in MetaStock. No structured result was returned."
+                    ),
+                    started_at=started_at,
+                    finished_at=self._utc_now(),
+                    diagnostics=diagnostics,
+                )
+
+            if not hasattr(workflow_result, "to_dict"):
+                raise TypeError(
+                    "The MetaStock workflow returned an unsupported result type: "
+                    f"{type(workflow_result).__name__}. "
+                    "Expected an object with a to_dict() method."
+                )
+
+            exploration_result = ( workflow_result.to_agent_contract_dict() )
+            diagnostics["exploration_result"] = ( exploration_result )
+
+            outcome = exploration_result.get("outcome")
+            matched_count = exploration_result.get("matched_count", 0)
+
+            if outcome == "no_matches":
+                message = (
+                    f"Explorer {normalized.name!r} ran successfully but matched "
+                    "no instruments. The Explorer should be revised."
+                )
+
+            elif outcome == "matches_found":
+                clipboard_verification = (
+                    exploration_result.get("clipboard_verification") or {}
+                )
+
+                if clipboard_verification.get("passed") is not True:
+                    raise RuntimeError(
+                        "MetaStock returned results, but clipboard verification "
+                        "did not pass."
+                    )
+
+                message = (
+                    f"Explorer {normalized.name!r} was created and run in "
+                    f"MetaStock. Captured and verified {matched_count} "
+                    "matched instruments."
+                )
+
+            else:
+                raise RuntimeError(
+                    "The MetaStock workflow returned an unknown outcome: "
+                    f"{outcome!r}."
+                )
 
             return AutomatorExecutionResult(
                 succeeded=True,
-                message=(
-                    f"Explorer {normalized.name!r} was created and run in MetaStock."
-                ),
+                message=message,
                 started_at=started_at,
                 finished_at=self._utc_now(),
-                diagnostics={
-                    "explorer_id": normalized.explorer_id,
-                    "explorer_name": normalized.name,
-                    "stdout_text": stdout_buffer.getvalue(),
-                    "stderr_text": stderr_buffer.getvalue(),
-                },
+                diagnostics=diagnostics,
             )
+
         except Exception as exc:
             return AutomatorExecutionResult(
                 succeeded=False,

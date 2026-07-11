@@ -397,3 +397,136 @@ class ExploreSelectors:
                 return btn
 
         return None
+    
+    def find_strategy_select_all_checkbox(
+        self,
+        main: BaseWrapper,
+    ) -> BaseWrapper:
+        """
+        Find the Select all checkbox beside the Explorer search box.
+
+        Prefer an accessible name. Fall back to the checkbox nearest
+        the visible 'Select all' text label.
+        """
+        checkboxes = safe_descendants(
+            main,
+            control_type="CheckBox",
+        )
+
+        for checkbox in checkboxes:
+            try:
+                info = checkbox.element_info
+
+                values = [
+                    normalize_text(info.name or ""),
+                    normalize_text(
+                        checkbox.window_text() or ""
+                    ),
+                    normalize_text(
+                        getattr(info, "help_text", "")
+                        or ""
+                    ),
+                ]
+
+                if any(
+                    value.casefold() == "select all"
+                    for value in values
+                ):
+                    log(
+                        "Found strategy Select all checkbox "
+                        "by accessible name."
+                    )
+                    return checkbox
+
+            except Exception:
+                continue
+
+        select_all_labels = []
+
+        for text_control in safe_descendants(
+            main,
+            control_type="Text",
+        ):
+            try:
+                text = normalize_text(
+                    text_control.window_text()
+                    or text_control.element_info.name
+                    or ""
+                )
+
+                if text.casefold() == "select all":
+                    select_all_labels.append(
+                        text_control
+                    )
+            except Exception:
+                continue
+
+        candidates: list[
+            tuple[int, BaseWrapper]
+        ] = []
+
+        for label in select_all_labels:
+            try:
+                label_rect = label.rectangle()
+                label_center_y = (
+                    label_rect.top + label_rect.bottom
+                ) // 2
+            except Exception:
+                continue
+
+            for checkbox in checkboxes:
+                try:
+                    checkbox_rect = checkbox.rectangle()
+                    checkbox_center_y = (
+                        checkbox_rect.top
+                        + checkbox_rect.bottom
+                    ) // 2
+
+                    vertical_distance = abs(
+                        checkbox_center_y
+                        - label_center_y
+                    )
+
+                    horizontal_gap = (
+                        label_rect.left
+                        - checkbox_rect.right
+                    )
+
+                    # Screenshot/UI layout:
+                    # checkbox is immediately left of the label.
+                    if vertical_distance > 25:
+                        continue
+
+                    if horizontal_gap < -10:
+                        continue
+
+                    if horizontal_gap > 100:
+                        continue
+
+                    score = (
+                        vertical_distance
+                        + abs(horizontal_gap)
+                    )
+
+                    candidates.append(
+                        (score, checkbox)
+                    )
+
+                except Exception:
+                    continue
+
+        if candidates:
+            candidates.sort(
+                key=lambda item: item[0]
+            )
+
+            log(
+                "Found strategy Select all checkbox "
+                "using label proximity."
+            )
+
+            return candidates[0][1]
+
+        raise RuntimeError(
+            "Could not find the strategy Select all checkbox."
+        )

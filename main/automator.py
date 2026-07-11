@@ -9,6 +9,13 @@ from guiReceiver import GuiRequestReceiver
 
 from phase2RequestReceiver import CliAddExplorerRequestReceiver, AddExplorerRequest
 from compartments.explorer_creator import ExplorerCreator
+from compartments.result_capture import (
+    ClipboardResultVerifier,
+    ExplorationResultCapture,
+)
+from compartments.result_scraper import (
+    ExplorationResultScraper,
+)
 
 from ui_interacter.ui_core import log
 from ui_interacter.ui_actions import UiActions
@@ -59,8 +66,9 @@ def build_shared_components():
         - ExploreConsole
     """
     actions = UiActions(
-        short_delay=SHORT_DELAY,
-        medium_delay=MEDIUM_DELAY,
+        click_settle_delay=0.03,
+        text_settle_delay=0.08,
+        key_delay=0.01,
     )
 
     selectors = ExploreSelectors()
@@ -109,26 +117,40 @@ def build_workflow(max_execution_wait_sec: int) -> ExploreWorkflow:
         poll_interval=EXECUTION_POLL_INTERVAL,
     )
 
+    result_scraper = ExplorationResultScraper(
+    page_load_delay=0.35,
+    max_stale_pages=4,
+)
+
+    clipboard_verifier = ClipboardResultVerifier(
+        actions=actions,
+        clipboard_timeout=5.0,
+        preserve_existing_clipboard=True,
+    )
+
+    result_capture = ExplorationResultCapture(
+        scraper=result_scraper,
+        verifier=clipboard_verifier,
+    )
+
     return ExploreWorkflow(
         app=app,
         console=console,
         strategy_selector=strategy_selector,
         instrument_selector=instrument_selector,
         execution_monitor=execution_monitor,
+        result_capture=result_capture,
     )
 
 
-def run_request(request: ExploreRequest) -> None:
-    """
-    Phase 1 runner.
-
-    Preserved so GUI mode and old CLI behavior continue to work.
-    """
+def run_request(request: ExploreRequest):
     workflow = build_workflow(
-        max_execution_wait_sec=request.max_execution_wait_sec,
+        max_execution_wait_sec=(
+            request.max_execution_wait_sec
+        ),
     )
 
-    workflow.run(request)
+    return workflow.run(request)
 
 
 # ============================================================
@@ -154,23 +176,18 @@ def run_add_request(request: AddExplorerRequest) -> None:
     creator.create(main_window, request)
 
 
-def run_add_and_run_request(request: AddExplorerRequest) -> None:
-    """
-    Integrated Phase 2 + Phase 1 runner:
-        add explorer -> run newly added explorer
-
-    This depends on phase2RequestReceiver setting:
-        request.strategy_name = request.name
-
-    So Phase 1 can receive the Phase 2 request object.
-    """
+def run_add_and_run_request(
+    request: AddExplorerRequest,
+):
     run_add_request(request)
 
     workflow = build_workflow(
-        max_execution_wait_sec=request.max_execution_wait_sec,
+        max_execution_wait_sec=(
+            request.max_execution_wait_sec
+        ),
     )
 
-    workflow.run(request)
+    return workflow.run(request)
 
 
 # ============================================================
@@ -208,6 +225,24 @@ def pop_mode_from_argv() -> str:
     # if first arg is --strategy, --gui, etc., use old Phase 1 behavior.
     return "run"
 
+def print_result_inspection(result) -> None:
+    if result is None:
+        log(
+            "Workflow returned no structured exploration result."
+        )
+        return
+
+    if not hasattr(result, "to_agent_contract_dict"):
+        log(
+            "Workflow returned an unsupported result type: "
+            f"{type(result).__name__}"
+        )
+        return
+
+    print(result.to_human_text())
+
+    print("\n=== AGENT JSON CONTRACT ===")
+    print(result.to_pretty_json())
 
 # ============================================================
 # MAIN
@@ -233,7 +268,9 @@ def main() -> None:
     if mode == "run":
         receiver = CliRequestReceiver()
         request = receiver.receive()
-        run_request(request)
+        
+        result = run_request(request)
+        print_result_inspection(result)
         return
 
     if mode == "add":
@@ -245,7 +282,9 @@ def main() -> None:
     if mode == "add-and-run":
         receiver = CliAddExplorerRequestReceiver()
         request = receiver.receive()
-        run_add_and_run_request(request)
+
+        result = run_add_and_run_request(request)
+        print_result_inspection(result)
         return
 
     raise ValueError(f"Unsupported automator mode: {mode!r}")
