@@ -407,16 +407,16 @@ class MetaStockAutomatorService:
     stay behind this service.
     """
 
-def __init__(
-    self,
-    result_reader: (
-        Callable[..., Any] | None
-    ) = None,
-) -> None:
-    self._result_reader = (
-        result_reader
-        or read_current_results
-    )
+    def __init__(
+        self,
+        result_reader: (
+            Callable[..., Any] | None
+        ) = None,
+    ) -> None:
+        self._result_reader = (
+            result_reader
+            or read_current_results
+        )
   
     def _call_execution_boundary(
         self,
