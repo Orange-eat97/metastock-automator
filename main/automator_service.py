@@ -386,37 +386,38 @@ class MetaStockAutomatorService:
 
     Public capabilities:
 
-    - run_explorer():
-      create and execute an Explorer, leaving the completed
-      Exploration Execution window ready to be read;
+    - create_explorer():
+      create an Explorer without selecting or running it;
+
+    - select_explorer():
+      select an existing Explorer and its instruments;
+
+    - run_selected_explorer():
+      run the currently selected Explorer and leave its completed
+      result window ready for reading;
 
     - read_results():
       scrape, normalize, clipboard-verify, and optionally close
       the currently open result window.
 
+    The legacy composite run_explorer() method remains present only
+    as a disabled compatibility boundary.
+
     UIA wrappers, selectors, and clipboard implementation details
     stay behind this service.
     """
 
-    def __init__(
-        self,
-        runner: (
-            Callable[[AddExplorerRequest], Any]
-            | None
-        ) = None,
-        result_reader: (
-            Callable[..., Any] | None
-        ) = None,
-    ) -> None:
-        self._runner = (
-            runner
-            or run_add_and_wait_request
-        )
-        self._result_reader = (
-            result_reader
-            or read_current_results
-        )
-
+def __init__(
+    self,
+    result_reader: (
+        Callable[..., Any] | None
+    ) = None,
+) -> None:
+    self._result_reader = (
+        result_reader
+        or read_current_results
+    )
+  
     def _call_execution_boundary(
         self,
         request: AutomatorExecutionRequest,
