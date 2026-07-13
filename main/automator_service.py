@@ -8,9 +8,12 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from automator import (
+    create_explorer_request,
     read_current_results,
-    run_add_and_wait_request,
+    run_selected_explorer_request,
+    select_explorer_request,
 )
+
 from phase2RequestReceiver import (
     AddExplorerRequest,
     ExplorerColumn,
@@ -383,41 +386,56 @@ class MetaStockAutomatorService:
 
     Public capabilities:
 
-    - run_explorer():
-      create and execute an Explorer, leaving the completed
-      Exploration Execution window ready to be read;
+    - create_explorer():
+      create an Explorer without selecting or running it;
+
+    - select_explorer():
+      select an existing Explorer and its instruments;
+
+    - run_selected_explorer():
+      run the currently selected Explorer and leave its completed
+      result window ready for reading;
 
     - read_results():
       scrape, normalize, clipboard-verify, and optionally close
       the currently open result window.
 
+    The legacy composite run_explorer() method remains present only
+    as a disabled compatibility boundary.
+
     UIA wrappers, selectors, and clipboard implementation details
     stay behind this service.
     """
 
-    def __init__(
-        self,
-        runner: (
-            Callable[[AddExplorerRequest], Any]
-            | None
-        ) = None,
-        result_reader: (
-            Callable[..., Any] | None
-        ) = None,
-    ) -> None:
-        self._runner = (
-            runner
-            or run_add_and_wait_request
-        )
-        self._result_reader = (
-            result_reader
-            or read_current_results
-        )
-
-    def run_explorer(
+def __init__(
+    self,
+    result_reader: (
+        Callable[..., Any] | None
+    ) = None,
+) -> None:
+    self._result_reader = (
+        result_reader
+        or read_current_results
+    )
+  
+    def _call_execution_boundary(
         self,
         request: AutomatorExecutionRequest,
+        *,
+        boundary: str,
+        runner: Callable[
+            [AddExplorerRequest],
+            Any,
+        ],
+        success_message: str,
+        result_available: bool,
     ) -> AutomatorExecutionResult:
+        """
+        Execute one auditable MetaStock boundary.
+
+        Each public method supplies exactly one deterministic runner:
+        create, select, or run selected.
+        """
         normalized = (
             self._normalize_execution_request(
                 request
@@ -438,27 +456,27 @@ class MetaStockAutomatorService:
                 redirect_stdout(stdout_buffer),
                 redirect_stderr(stderr_buffer),
             ):
-                self._runner(add_request)
+                runner(add_request)
 
             return AutomatorExecutionResult(
                 succeeded=True,
-                message=(
-                    f"Explorer {normalized.name!r} "
-                    "was created and run in MetaStock. "
-                    "Its completed results are ready "
-                    "to be read."
+                message=success_message.format(
+                    explorer_name=normalized.name
                 ),
                 started_at=started_at,
                 finished_at=self._utc_now(),
-                result_available=True,
+                result_available=result_available,
                 diagnostics={
+                    "boundary": boundary,
                     "explorer_id": (
                         normalized.explorer_id
                     ),
                     "explorer_name": (
                         normalized.name
                     ),
-                    "result_available": True,
+                    "result_available": (
+                        result_available
+                    ),
                     "stdout_text": (
                         stdout_buffer.getvalue()
                     ),
@@ -472,13 +490,13 @@ class MetaStockAutomatorService:
             return AutomatorExecutionResult(
                 succeeded=False,
                 message=(
-                    "MetaStock execution failed: "
-                    f"{exc}"
+                    f"{boundary} failed: {exc}"
                 ),
                 started_at=started_at,
                 finished_at=self._utc_now(),
                 result_available=False,
                 diagnostics={
+                    "boundary": boundary,
                     "explorer_id": (
                         normalized.explorer_id
                     ),
@@ -501,6 +519,89 @@ class MetaStockAutomatorService:
                     ),
                 },
             )
+
+
+    def create_explorer(
+        self,
+        request: AutomatorExecutionRequest,
+    ) -> AutomatorExecutionResult:
+        return self._call_execution_boundary(
+            request,
+            boundary="create_explorer",
+            runner=create_explorer_request,
+            success_message=(
+                "Explorer {explorer_name!r} was "
+                "created in MetaStock. It was not "
+                "selected or run."
+            ),
+            result_available=False,
+        )
+
+
+    def select_explorer(
+        self,
+        request: AutomatorExecutionRequest,
+    ) -> AutomatorExecutionResult:
+        return self._call_execution_boundary(
+            request,
+            boundary="select_explorer",
+            runner=select_explorer_request,
+            success_message=(
+                "Explorer {explorer_name!r} and "
+                "instruments were selected in "
+                "MetaStock. Execution has not started."
+            ),
+            result_available=False,
+        )
+
+
+    def run_selected_explorer(
+        self,
+        request: AutomatorExecutionRequest,
+    ) -> AutomatorExecutionResult:
+        return self._call_execution_boundary(
+            request,
+            boundary="run_selected_explorer",
+            runner=run_selected_explorer_request,
+            success_message=(
+                "The currently selected Explorer was "
+                "run in MetaStock. Its completed "
+                "results are ready to be read."
+            ),
+            result_available=True,
+        )
+
+
+    def run_explorer(
+        self,
+        request: AutomatorExecutionRequest,
+    ) -> AutomatorExecutionResult:
+        """
+        The former composite create/select/run operation is deliberately
+        disabled for agent use.
+        """
+        started_at = self._utc_now()
+
+        return AutomatorExecutionResult(
+            succeeded=False,
+            message=(
+                "Composite run_explorer() is disabled. "
+                "Call create_explorer(), "
+                "select_explorer(), and "
+                "run_selected_explorer() as separate "
+                "service methods."
+            ),
+            started_at=started_at,
+            finished_at=self._utc_now(),
+            result_available=False,
+            diagnostics={
+                "boundary": "run_explorer",
+                "disabled_reason": (
+                    "create/select/run must remain "
+                    "separate"
+                ),
+            },
+        )
 
     def read_results(
         self,
@@ -776,140 +877,3 @@ class MetaStockAutomatorService:
         return datetime.now(
             timezone.utc
         ).isoformat()
-
-# ============================================================
-# TRUE SERVICE BOUNDARY PATCH
-# ============================================================
-
-from automator import (
-    create_explorer_request as _m7_create_explorer_request,
-    select_explorer_request as _m7_select_explorer_request,
-    run_selected_explorer_request as _m7_run_selected_explorer_request,
-)
-
-
-def _m7_service_call(
-    self,
-    request,
-    *,
-    tool_label: str,
-    runner,
-    success_message: str,
-    result_available: bool,
-):
-    normalized = self._normalize_execution_request(request)
-    add_request = self._to_add_explorer_request(normalized)
-
-    started_at = self._utc_now()
-    stdout_buffer = io.StringIO()
-    stderr_buffer = io.StringIO()
-
-    try:
-        with (
-            redirect_stdout(stdout_buffer),
-            redirect_stderr(stderr_buffer),
-        ):
-            runner(add_request)
-
-        return AutomatorExecutionResult(
-            succeeded=True,
-            message=success_message.format(explorer_name=normalized.name),
-            started_at=started_at,
-            finished_at=self._utc_now(),
-            result_available=result_available,
-            diagnostics={
-                "boundary": tool_label,
-                "explorer_id": normalized.explorer_id,
-                "explorer_name": normalized.name,
-                "result_available": result_available,
-                "stdout_text": stdout_buffer.getvalue(),
-                "stderr_text": stderr_buffer.getvalue(),
-            },
-        )
-
-    except Exception as exc:
-        return AutomatorExecutionResult(
-            succeeded=False,
-            message=f"{tool_label} failed: {exc}",
-            started_at=started_at,
-            finished_at=self._utc_now(),
-            result_available=False,
-            diagnostics={
-                "boundary": tool_label,
-                "explorer_id": normalized.explorer_id,
-                "explorer_name": normalized.name,
-                "result_available": False,
-                "error_type": type(exc).__name__,
-                "error_message": str(exc),
-                "traceback": traceback.format_exc(),
-                "stdout_text": stdout_buffer.getvalue(),
-                "stderr_text": stderr_buffer.getvalue(),
-            },
-        )
-
-
-def _m7_create_explorer(self, request):
-    return _m7_service_call(
-        self,
-        request,
-        tool_label="create_explorer",
-        runner=_m7_create_explorer_request,
-        success_message=(
-            "Explorer {explorer_name!r} was created in MetaStock. "
-            "It was not selected or run."
-        ),
-        result_available=False,
-    )
-
-
-def _m7_select_explorer(self, request):
-    return _m7_service_call(
-        self,
-        request,
-        tool_label="select_explorer",
-        runner=_m7_select_explorer_request,
-        success_message=(
-            "Explorer {explorer_name!r} and instruments were selected "
-            "in MetaStock. Execution has not started."
-        ),
-        result_available=False,
-    )
-
-
-def _m7_run_selected_explorer(self, request):
-    return _m7_service_call(
-        self,
-        request,
-        tool_label="run_selected_explorer",
-        runner=_m7_run_selected_explorer_request,
-        success_message=(
-            "The currently selected Explorer was run in MetaStock. "
-            "Its completed results are ready to be read."
-        ),
-        result_available=True,
-    )
-
-
-def _m7_composite_run_explorer_disabled(self, request):
-    started_at = self._utc_now()
-    return AutomatorExecutionResult(
-        succeeded=False,
-        message=(
-            "Composite run_explorer() is disabled by the true service "
-            "boundary patch. Call create_explorer(), select_explorer(), "
-            "and run_selected_explorer() as separate service methods."
-        ),
-        started_at=started_at,
-        finished_at=self._utc_now(),
-        result_available=False,
-        diagnostics={
-            "boundary": "run_explorer",
-            "disabled_reason": "create/select/run must remain separate",
-        },
-    )
-
-
-MetaStockAutomatorService.create_explorer = _m7_create_explorer
-MetaStockAutomatorService.select_explorer = _m7_select_explorer
-MetaStockAutomatorService.run_selected_explorer = _m7_run_selected_explorer
-MetaStockAutomatorService.run_explorer = _m7_composite_run_explorer_disabled
