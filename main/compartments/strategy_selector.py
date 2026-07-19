@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 from pywinauto.base_wrapper import BaseWrapper
 
 from ui_interacter.ui_actions import UiActions
@@ -40,7 +42,12 @@ class StrategySelector:
     ):
         self.actions = actions
         self.selectors = selectors
-        self.search_filter_timeout = search_filter_timeout
+        # MetaStock updates its WPF filtered list asynchronously.
+        # Two seconds was too aggressive on packaged beta runs.
+        self.search_filter_timeout = max(
+            float(search_filter_timeout),
+            5.0,
+        )
 
     def select(self, main: BaseWrapper, strategy_name: str) -> None:
         self.select_by_search(main, strategy_name)
@@ -58,18 +65,27 @@ class StrategySelector:
             return normalize_text(search_box.element_info.name or "")
         except Exception:
             return ""
-
-    def strategy_search_matches(self, current_text: str, strategy_name: str) -> bool:
-        """
-        Returns True if the current search box already contains the target strategy search.
-        """
-        current = normalize_text(current_text).lower()
-        target = normalize_text(strategy_name).lower()
+        
+    def strategy_search_matches(
+        self,
+        current_text: str,
+        strategy_name: str,
+    ) -> bool:
+        current = normalize_text(
+            current_text
+        ).casefold()
+        target = normalize_text(
+            strategy_name
+        ).casefold()
 
         if not current:
             return False
 
-        return current == target or target in current or current in target
+        return (
+            current == target
+            or target in current
+            or current in target
+        )
 
     def wait_for_strategy_list_after_search(self, main: BaseWrapper) -> None:
         """
@@ -94,6 +110,7 @@ class StrategySelector:
         self,
         main: BaseWrapper,
         strategy_name: str,
+        row: BaseWrapper | None = None,
     ) -> None:
         """
         Click the checkbox area for the unique filtered strategy row.
@@ -105,7 +122,19 @@ class StrategySelector:
 
         If no real checkbox is exposed, click relative to the discovered ListBoxItem row.
         """
-        row = self.selectors.find_unique_filtered_strategy_row(main)
+        if row is None:
+            rows = self.selectors.find_filtered_strategy_rows(
+                main
+            )
+
+            if not rows:
+                raise RuntimeError(
+                    "No Explorer row was returned by the "
+                    "MetaStock search."
+                )
+
+            row = rows[0]
+
         checkbox = self.selectors.find_checkbox_in_row(row)
 
         if checkbox is not None:
@@ -144,8 +173,8 @@ class StrategySelector:
         1. Clear old search.
         2. Reset Selected count to zero.
         3. Search for the target strategy.
-        4. Require one unique filtered row.
-        5. Select it.
+        4. Wait for at least one stable filtered row.
+        5. Select the first returned row.
         6. Require Selected count to become exactly one.
         """
         log(
@@ -168,27 +197,55 @@ class StrategySelector:
         )
 
         log(
-            "Waiting for one filtered Explorer row..."
+            "Waiting for MetaStock Explorer search results..."
         )
 
-        def unique_filtered_row_ready():
+        def first_filtered_target_ready():
             try:
-                return (
+                rows = (
                     self.selectors
-                    .find_unique_filtered_strategy_row(main)
+                    .find_filtered_strategy_rows(main)
                 )
+
+                if rows:
+                    return (
+                        "row",
+                        rows[0],
+                    )
+
+                checkbox = (
+                    self.selectors
+                    .find_first_filtered_strategy_checkbox(
+                        main
+                    )
+                )
+
+                if checkbox is not None:
+                    return (
+                        "checkbox",
+                        checkbox,
+                    )
+
+                return None
+
             except Exception:
                 return None
 
-        wait_until(
-            unique_filtered_row_ready,
+        # Require several successful reads so the WPF result has
+        # materialized. Always select the first visible result row.
+        filtered_target = wait_until_stable(
+            first_filtered_target_ready,
             timeout=self.search_filter_timeout,
-            interval=0.03,
+            interval=0.10,
+            stable_reads=3,
             error_msg=(
-                "A unique Explorer row did not appear "
+                "No Explorer row or checkbox appeared "
                 "after searching"
             ),
         )
+
+        # Let the checkbox hit target settle after the last list update.
+        time.sleep(0.25)
 
         selected_before = get_selected_count(main)
 
@@ -199,10 +256,30 @@ class StrategySelector:
                 f"Actual selected count: {selected_before}"
             )
 
-        self.click_strategy_checkbox(
-            main,
-            strategy_name,
+        target_type, target_control = (
+            filtered_target
         )
+
+        if target_type == "checkbox":
+            log(
+                "Explorer row was not exposed as a "
+                "ListBoxItem; clicking its first visible "
+                "checkbox directly."
+            )
+
+            self.actions.click_control(
+                target_control,
+                label=(
+                    "first filtered Explorer checkbox"
+                ),
+            )
+
+        else:
+            self.click_strategy_checkbox(
+                main,
+                strategy_name,
+                row=target_control,
+            )
 
         wait_until_stable(
             lambda: get_selected_count(main) == 1,
