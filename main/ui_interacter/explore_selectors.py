@@ -259,6 +259,95 @@ class ExploreSelectors:
 
         return row
 
+    def find_first_filtered_strategy_checkbox(
+        self,
+        main: BaseWrapper,
+    ) -> Optional[BaseWrapper]:
+        """
+        Find the first visible Explorer-result checkbox.
+
+        Some MetaStock/WPF states display the filtered Explorer row
+        correctly but do not expose it as a descendant ListBoxItem.
+        The row checkbox can still be available through the main UIA
+        tree, so search for checkboxes whose centre lies inside the
+        strategy-list rectangle.
+        """
+        list_view = self.find_strategy_list_view(main)
+        list_rect = list_view.rectangle()
+
+        candidates: list[
+            tuple[int, int, BaseWrapper]
+        ] = []
+
+        for checkbox in safe_descendants(
+            main,
+            control_type="CheckBox",
+        ):
+            try:
+                rectangle = checkbox.rectangle()
+
+                center_x = (
+                    rectangle.left + rectangle.right
+                ) // 2
+                center_y = (
+                    rectangle.top + rectangle.bottom
+                ) // 2
+
+                inside_strategy_list = (
+                    list_rect.left
+                    <= center_x
+                    <= list_rect.right
+                    and list_rect.top
+                    <= center_y
+                    <= list_rect.bottom
+                )
+
+                if not inside_strategy_list:
+                    continue
+
+                if (
+                    rectangle.width() <= 5
+                    or rectangle.height() <= 5
+                    or rectangle.width() > 60
+                    or rectangle.height() > 60
+                ):
+                    continue
+
+                candidates.append(
+                    (
+                        rectangle.top,
+                        rectangle.left,
+                        checkbox,
+                    )
+                )
+
+            except Exception:
+                continue
+
+        if not candidates:
+            return None
+
+        candidates.sort(
+            key=lambda item: (
+                item[0],
+                item[1],
+            )
+        )
+
+        first_checkbox = candidates[0][2]
+        rectangle = first_checkbox.rectangle()
+
+        log(
+            "Using first visible Explorer-result "
+            "checkbox fallback: "
+            f"rect=({rectangle.left},"
+            f"{rectangle.top},"
+            f"{rectangle.right},"
+            f"{rectangle.bottom})"
+        )
+
+        return first_checkbox
+
     def find_checkbox_in_row(self, row: BaseWrapper) -> Optional[BaseWrapper]:
         """
         Find a real CheckBox inside a row if UIA exposes one.

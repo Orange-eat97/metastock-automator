@@ -52,7 +52,13 @@ class ExploreConsole:
             x = r.left + 28
             y = r.top + 390
 
-            self.actions.click_point(x, y, "Explore tab fallback")
+            self.actions.click_point(
+                x,
+                y,
+                "Explore tab fallback",
+                main=main,
+                calibration_point_name="explore_tab",
+            )
 
         log("Waiting for Explore Console to load...")
 
@@ -87,7 +93,13 @@ class ExploreConsole:
 
         if self.allow_start_fallback_click and self.start_fallback_absolute_xy is not None:
             x, y = self.start_fallback_absolute_xy
-            self.actions.click_point(x, y, "Start Exploration fallback")
+            self.actions.click_point(
+                x,
+                y,
+                "Start Exploration fallback",
+                main=main,
+                calibration_point_name="start_exploration",
+            )
             return
 
         raise RuntimeError(
